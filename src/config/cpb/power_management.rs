@@ -1,52 +1,52 @@
 //! PCI power management capability structure.
 
 use crate::{
-	config::{accessors, bit_accessors, BitField},
-	map, VolatilePtr,
+	config::{accessors, bit_accessors, ReprPrimitive},
+	struct_offsets, Ptr,
 };
 
-#[derive(Debug)] // FIXME: remove
-#[derive(Clone, Copy)]
-#[repr(C, align(4))]
-pub(super) struct PowerManagement {
-	_common: [u8; 2],
-	cpbs: PowerManagementCpbs,
-	control_status: ControlStatus,
-	_reserved: u8,
-	data: u8,
+pub const ID: u8 = 1;
+
+struct_offsets! {
+	struct PowerManagement {
+		_common: [u8; 2],
+		cpbs: PowerManagementCpbs,
+		control_status: ControlStatus,
+		_reserved: u8,
+		data: u8,
+	}
 }
 
 /// Reference to a PCI power management capability structure.
 #[derive(Clone, Copy, Debug)]
-pub struct PowerManagementRef(pub(super) VolatilePtr<PowerManagement>);
+pub struct PowerManagementRef<P: Ptr>(pub(super) P);
 
-impl PowerManagementRef {
-	pub const ID: u8 = 1;
-
+impl<P: Ptr> PowerManagementRef<P> {
 	accessors! {
+		use PowerManagement;
 		cpbs: PowerManagementCpbs { get; }
 		/// Call [`ControlStatus::mask_preserved`] before setting this register.
 		control_status: ControlStatus { get; set set_control_status; }
 	}
 
 	/// Power consumed in milliwatts.
-	pub fn power_consumed(self, state: PowerState) -> Option<u16> {
+	pub fn power_consumed(&self, state: PowerState) -> Option<u16> {
 		self.get_data(state as u8)
 	}
 
 	/// Power dissipated in milliwatts.
-	pub fn power_dissipated(self, state: PowerState) -> Option<u16> {
+	pub fn power_dissipated(&self, state: PowerState) -> Option<u16> {
 		self.get_data(state as u8 | 4)
 	}
 
 	/// Common logic power consumed in milliwatts.
 	///
 	/// Only available on Function 0.
-	pub fn common_logic_power_consumed(self) -> Option<u16> {
+	pub fn common_logic_power_consumed(&self) -> Option<u16> {
 		self.get_data(8)
 	}
 
-	fn get_data(self, data_select: u8) -> Option<u16> {
+	fn get_data(&self, data_select: u8) -> Option<u16> {
 		self.set_control_status(
 			self.control_status()
 				.mask_preserved()
@@ -54,7 +54,7 @@ impl PowerManagementRef {
 		);
 		self.control_status()
 			.data_scale()
-			.map(|s| s as u16 * map!(self->data).read() as u16)
+			.map(|s| s as u16 * unsafe { self.0.offset(PowerManagement::data).read8() } as u16)
 	}
 }
 
@@ -93,8 +93,8 @@ impl PowerManagementCpbs {
 	}
 }
 
-impl BitField for PowerManagementCpbs {
-	type Inner = u16;
+unsafe impl ReprPrimitive for PowerManagementCpbs {
+	type Repr = u16;
 }
 
 /// Control/status value of a
@@ -138,8 +138,8 @@ impl ControlStatus {
 	}
 }
 
-impl BitField for ControlStatus {
-	type Inner = u16;
+unsafe impl ReprPrimitive for ControlStatus {
+	type Repr = u16;
 }
 
 /// Device power management state.

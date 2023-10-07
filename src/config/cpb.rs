@@ -12,10 +12,9 @@ use core::{
 };
 
 use super::HeaderRef;
-use crate::{cast, map, VolatilePtr};
+use crate::Ptr;
 
-#[derive(Clone, Copy)]
-#[repr(C, align(4))]
+#[repr(C, align(2))]
 struct CpbHeader {
 	id: u8,
 	next_ptr: u8,
@@ -23,32 +22,32 @@ struct CpbHeader {
 
 /// Iterates over PCI capabilities. Skips null capabilities.
 #[derive(Clone)]
-pub struct CpbIter {
-	header: VolatilePtr<u8>,
+pub struct CpbIter<P: Ptr> {
+	header_ptr: P,
 	current_offset: u8,
 	type1: bool,
 }
 
-impl CpbIter {
-	pub(super) fn new(header: HeaderRef, ptr: u8) -> Self {
+impl<P: Ptr> CpbIter<P> {
+	pub(super) fn new(header: HeaderRef<P>, offset: u8) -> Self {
 		Self {
-			header: cast!(header.0),
-			current_offset: ptr & 0xFC,
-			type1: header.specific().get_type() == 1,
+			type1: header.header_type().get() == 1,
+			header_ptr: header.0,
+			current_offset: offset & 0xFC,
 		}
 	}
 }
 
-impl Iterator for CpbIter {
-	type Item = Cpb;
+impl<P: Ptr> Iterator for CpbIter<P> {
+	type Item = Cpb<P>;
 
 	fn next(&mut self) -> Option<Self::Item> {
 		loop {
 			if self.current_offset == 0 {
 				return None;
 			}
-			let ptr: VolatilePtr<CpbHeader> = cast!(map!((self.header)[self.current_offset]));
-			let cpb_header = ptr.read();
+			let ptr = unsafe { self.header_ptr.offset(self.current_offset as i32) };
+			let cpb_header: CpbHeader = unsafe { core::mem::transmute(ptr.read16()) };
 			self.current_offset = cpb_header.next_ptr & 0xFC;
 			if cpb_header.id != 0 {
 				return Some(Cpb {
@@ -60,9 +59,9 @@ impl Iterator for CpbIter {
 	}
 }
 
-impl FusedIterator for CpbIter {}
+impl<P: Ptr> FusedIterator for CpbIter<P> {}
 
-impl Debug for CpbIter {
+impl<P: Ptr> Debug for CpbIter<P> {
 	fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
 		f.debug_list().entries(self.clone()).finish()
 	}
@@ -70,67 +69,65 @@ impl Debug for CpbIter {
 
 /// PCI capability structure of any type. Use the methods to get a specific one.
 #[derive(Clone, Copy)]
-pub struct Cpb {
-	ptr: VolatilePtr<CpbHeader>,
+pub struct Cpb<P: Ptr> {
+	ptr: P,
 	type1: bool,
 }
 
-impl Cpb {
-	pub fn id(self) -> u8 {
-		map!((self.ptr).id).read()
+impl<P: Ptr> Cpb<P> {
+	pub fn id(&self) -> u8 {
+		unsafe { self.ptr.read8() }
 	}
 
-	pub fn power_management(self) -> Option<power_management::PowerManagementRef> {
-		(self.id() == power_management::PowerManagementRef::ID)
-			.then(|| power_management::PowerManagementRef(cast!(self.ptr)))
+	pub fn power_management(&self) -> Option<power_management::PowerManagementRef<P>> {
+		(self.id() == power_management::ID)
+			.then(|| power_management::PowerManagementRef(self.ptr.clone()))
 	}
 
-	pub fn vpd(self) -> Option<vpd::VpdRef> {
-		(self.id() == vpd::VpdRef::ID).then(|| vpd::VpdRef(cast!(self.ptr)))
+	pub fn vpd(&self) -> Option<vpd::VpdRef<P>> {
+		(self.id() == vpd::ID).then(|| vpd::VpdRef(self.ptr.clone()))
 	}
 
-	pub fn msi(self) -> Option<msi::MsiRef> {
-		(self.id() == msi::MsiRef::ID).then(|| msi::MsiRef::new(cast!(self.ptr)))
+	pub fn msi(&self) -> Option<msi::MsiRef<P>> {
+		(self.id() == msi::ID).then(|| msi::MsiRef::new(self.ptr.clone()))
 	}
 
-	pub fn vendor_specific(self) -> Option<vendor_specific::VendorSpecificRef> {
-		(self.id() == vendor_specific::VendorSpecificRef::ID)
-			.then(|| vendor_specific::VendorSpecificRef(cast!(self.ptr)))
+	pub fn vendor_specific(&self) -> Option<vendor_specific::VendorSpecificRef<P>> {
+		(self.id() == vendor_specific::ID)
+			.then(|| vendor_specific::VendorSpecificRef(self.ptr.clone()))
 	}
 
-	pub fn bridge_subsys_id(self) -> Option<bridge_subsys_id::BridgeSubsysIdRef> {
-		(self.id() == bridge_subsys_id::BridgeSubsysIdRef::ID)
-			.then(|| bridge_subsys_id::BridgeSubsysIdRef(cast!(self.ptr)))
+	pub fn bridge_subsys_id(&self) -> Option<bridge_subsys_id::BridgeSubsysIdRef<P>> {
+		(self.id() == bridge_subsys_id::ID)
+			.then(|| bridge_subsys_id::BridgeSubsysIdRef(self.ptr.clone()))
 	}
 
-	pub fn pcie(self) -> Option<pcie::PcieRef> {
-		(self.id() == pcie::PcieRef::ID).then(|| pcie::PcieRef(cast!(self.ptr)))
+	pub fn pcie(&self) -> Option<pcie::PcieRef<P>> {
+		(self.id() == pcie::ID).then(|| pcie::PcieRef(self.ptr.clone()))
 	}
 
-	pub fn msix(self) -> Option<msix::MsixRef> {
-		(self.id() == msix::MsixRef::ID).then(|| msix::MsixRef(cast!(self.ptr)))
+	pub fn msix(&self) -> Option<msix::MsixRef<P>> {
+		(self.id() == msix::ID).then(|| msix::MsixRef(self.ptr.clone()))
 	}
 
-	pub fn advanced_features(self) -> Option<advanced_features::AdvancedFeaturesRef> {
-		(self.id() == advanced_features::AdvancedFeaturesRef::ID)
-			.then(|| advanced_features::AdvancedFeaturesRef(cast!(self.ptr)))
+	pub fn advanced_features(&self) -> Option<advanced_features::AdvancedFeaturesRef<P>> {
+		(self.id() == advanced_features::ID)
+			.then(|| advanced_features::AdvancedFeaturesRef(self.ptr.clone()))
 	}
 
-	pub fn enhanced_alloc(self) -> Option<enhanced_alloc::EnhancedAllocRef> {
-		(self.id() == enhanced_alloc::EnhancedAllocRef::ID).then(|| {
-			enhanced_alloc::EnhancedAllocRef {
-				ptr: cast!(self.ptr),
-				type1: self.type1,
-			}
+	pub fn enhanced_alloc(&self) -> Option<enhanced_alloc::EnhancedAllocRef<P>> {
+		(self.id() == enhanced_alloc::ID).then(|| enhanced_alloc::EnhancedAllocRef {
+			ptr: self.ptr.clone(),
+			type1: self.type1,
 		})
 	}
 
-	pub fn fpb(self) -> Option<fpb::FpbRef> {
-		(self.id() == fpb::FpbRef::ID).then(|| fpb::FpbRef(cast!(self.ptr)))
+	pub fn fpb(&self) -> Option<fpb::FpbRef<P>> {
+		(self.id() == fpb::ID).then(|| fpb::FpbRef(self.ptr.clone()))
 	}
 }
 
-impl Debug for Cpb {
+impl<P: Ptr> Debug for Cpb<P> {
 	fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
 		let mut d = f.debug_struct("Cpb");
 		d.field("id", &self.id());
@@ -171,44 +168,45 @@ pub mod vpd {
 		task::Poll,
 	};
 
-	use crate::{map, VolatilePtr};
+	use crate::{struct_offsets, Ptr, PtrExt};
 
-	#[derive(Debug)] // FIXME: remove
-	#[derive(Clone, Copy)]
-	#[repr(C)]
-	pub(super) struct Vpd {
-		_common: [u8; 2],
-		address: u16,
-		data: u32,
+	pub const ID: u8 = 3;
+
+	struct_offsets! {
+		struct Vpd {
+			_common: [u8; 2],
+			address: u16,
+			data: u32,
+		}
 	}
 
 	/// Reference to a vital product data capability structure.
 	#[derive(Clone, Copy, Debug)]
-	pub struct VpdRef(pub(super) VolatilePtr<Vpd>);
+	pub struct VpdRef<P: Ptr>(pub(super) P);
 
 	// no idea if the compiler fences are worth it; my idea was that it should try to do as much
 	// work as possible in between the start_* and the poll_*
-	impl VpdRef {
-		pub const ID: u8 = 3;
-
-		pub fn start_read(self, address: u16) {
+	impl<P: Ptr> VpdRef<P> {
+		pub fn start_read(&self, address: u16) {
 			debug_assert!(address % 4 == 0 && address < 0x8000, "invalid VPD address");
-			map!(self->address).write((address & 0x7FFF).to_le());
+			unsafe {
+				self.0.offset(Vpd::address).write16_le(address & 0x7FFF);
+			}
 			compiler_fence(Acquire);
 		}
 
-		pub fn poll_read(self) -> Poll<u32> {
+		pub fn poll_read(&self) -> Poll<u32> {
 			compiler_fence(Release);
-			if u16::from_le(map!(self->address).read()) & 0x8000 == 0 {
+			if unsafe { self.0.offset(Vpd::address).read16_le() } & 0x8000 == 0 {
 				Poll::Pending
 			} else {
-				Poll::Ready(u32::from_le(map!(self->data).read()))
+				Poll::Ready(unsafe { self.0.offset(Vpd::data).read32_le() })
 			}
 		}
 
 		/// Convencience method that calls [`Self::start_read`] and then
 		/// repeatedly [`Self::poll_read`].
-		pub fn read(self, address: u16) -> u32 {
+		pub fn read(&self, address: u16) -> u32 {
 			self.start_read(address);
 			loop {
 				if let Poll::Ready(val) = self.poll_read() {
@@ -217,16 +215,18 @@ pub mod vpd {
 			}
 		}
 
-		pub fn start_write(self, address: u16, val: u32) {
+		pub fn start_write(&self, address: u16, val: u32) {
 			debug_assert!(address % 4 == 0 && address < 0x8000, "invalid VPD address");
-			map!(self->data).write(val.to_le());
-			map!(self->address).write((address | 0x8000).to_le());
+			unsafe {
+				self.0.offset(Vpd::data).write32_le(val);
+				self.0.offset(Vpd::address).write16_le(address | 0x8000);
+			}
 			compiler_fence(Acquire);
 		}
 
-		pub fn poll_write(self) -> Poll<()> {
+		pub fn poll_write(&self) -> Poll<()> {
 			compiler_fence(Release);
-			if map!(self->address).read() & 0x8000 == 0 {
+			if unsafe { self.0.offset(Vpd::address).read16_le() & 0x8000 == 0 } {
 				Poll::Ready(())
 			} else {
 				Poll::Pending
@@ -235,7 +235,7 @@ pub mod vpd {
 
 		/// Convencience method that calls [`Self::start_write`] and then
 		/// repeatedly [`Self::poll_write`].
-		pub fn write(self, address: u16, val: u32) {
+		pub fn write(&self, address: u16, val: u32) {
 			self.start_write(address, val);
 			while self.poll_write().is_pending() {}
 		}
@@ -244,35 +244,35 @@ pub mod vpd {
 
 /// Vendor-specific capability structure.
 pub mod vendor_specific {
-	use crate::{cast, config::accessors, map, VolatilePtr};
+	use crate::{config::accessors, struct_offsets, Ptr, ReprPrimitive};
 
-	#[derive(Debug)] // FIXME: remove
-	#[derive(Clone, Copy)]
-	#[repr(C, align(4))]
-	pub(super) struct VendorSpecific {
-		_common: [u8; 2],
-		len: u8,
+	pub const ID: u8 = 9;
+
+	struct_offsets! {
+		struct VendorSpecific {
+			_common: [u8; 2],
+			len: u8,
+		}
 	}
 
 	/// Reference to a vendor-specific capability structure.
 	#[derive(Clone, Copy, Debug)]
-	pub struct VendorSpecificRef(pub(super) VolatilePtr<VendorSpecific>);
+	pub struct VendorSpecificRef<P: Ptr>(pub(super) P);
 
-	impl VendorSpecificRef {
-		pub const ID: u8 = 9;
-
+	impl<P: Ptr> VendorSpecificRef<P> {
 		accessors! {
+			use VendorSpecific;
 			len: u8 { get; }
 		}
 
-		pub fn is_empty(self) -> bool {
+		pub fn is_empty(&self) -> bool {
 			self.len() == 0
 		}
 
 		/// `offset` is the byte offset from the start of the capability
 		/// structure.
-		pub fn get(self, offset: u8) -> Option<u8> {
-			(offset < self.len()).then(|| map!((cast!(self.0 => u8))[offset]).read())
+		pub fn get(&self, offset: u8) -> Option<u8> {
+			(offset < self.len()).then(|| unsafe { self.0.offset(offset as i32).read8() })
 		}
 
 		/// `offset` is the byte offset from the start of the capability
@@ -280,52 +280,57 @@ pub mod vendor_specific {
 		///
 		/// # Panics
 		/// Panics on an out-of-bounds write attempt.
-		pub fn set(self, offset: u8, val: u8) {
+		pub fn set(&self, offset: u8, val: u8) {
 			assert!(offset < self.len(), "index out of bounds");
-			map!((cast!(self.0 => u8))[offset]).write(val);
+			unsafe {
+				self.0.offset(offset as i32).write8(val);
+			}
 		}
 
 		/// `offset` is the byte offset from the start of the capability
-		/// structure divided by 4.
-		pub fn get_u32(self, offset: u8) -> Option<u32> {
-			(offset < self.len() >> 2).then(|| map!((cast!(self.0 => u32))[offset]).read())
+		/// structure divided by 4. Returned value is little-endian.
+		pub fn get_u32(&self, offset: u8) -> Option<u32> {
+			(offset < self.len() >> 2)
+				.then(|| unsafe { self.0.offset((offset as i32) << 2).read32() })
 		}
 
 		/// `offset` is the byte offset from the start of the capability
-		/// structure divided by 4.
+		/// structure divided by 4. Returned value is little-endian.
 		///
 		/// # Panics
 		/// Panics on an out-of-bounds write attempt.
-		pub fn set_u32(self, offset: u8, val: u32) {
+		pub fn set_u32(&self, offset: u8, val: u32) {
 			assert!(offset < self.len() >> 2, "index out of bounds");
-			map!((cast!(self.0 => u32))[offset]).write(val);
+			unsafe {
+				self.0.offset((offset as i32) << 2).write32(val);
+			}
 		}
 	}
 }
 
 /// PCI bridge subsystem ID and subsystem vendor ID capability structure.
 pub mod bridge_subsys_id {
-	use crate::{config::accessors, VolatilePtr};
+	use crate::{config::accessors, struct_offsets, Ptr, ReprPrimitive};
 
-	#[derive(Debug)] // FIXME: remove
-	#[derive(Clone, Copy)]
-	#[repr(C, align(4))]
-	pub(super) struct BridgeSubsysId {
-		_common: [u8; 2],
-		_reserved: [u8; 2],
-		vendor_id: u16,
-		id: u16,
+	pub const ID: u8 = 0x0D;
+
+	struct_offsets! {
+		struct BridgeSubsysId {
+			_common: [u8; 2],
+			_reserved: [u8; 2],
+			vendor_id: u16,
+			id: u16,
+		}
 	}
 
 	/// Reference to a subsystem ID and subsystem vendor ID capability
 	/// structure.
 	#[derive(Clone, Copy, Debug)]
-	pub struct BridgeSubsysIdRef(pub(super) VolatilePtr<BridgeSubsysId>);
+	pub struct BridgeSubsysIdRef<P: Ptr>(pub(super) P);
 
-	impl BridgeSubsysIdRef {
-		pub const ID: u8 = 0x0D;
-
+	impl<P: Ptr> BridgeSubsysIdRef<P> {
 		accessors! {
+			use BridgeSubsysId;
 			vendor_id: u16 { get => u16::from_le; }
 			id: u16 { get => u16::from_le; }
 		}
@@ -335,45 +340,45 @@ pub mod bridge_subsys_id {
 /// MSI-X capability structure.
 pub mod msix {
 	use crate::{
-		config::{accessors, bit_accessors, BitField},
-		map, VolatilePtr,
+		config::{accessors, bit_accessors, ReprPrimitive},
+		struct_offsets, Ptr, PtrExt,
 	};
 
-	#[derive(Debug)] // FIXME: remove
-	#[derive(Clone, Copy)]
-	#[repr(C)]
-	pub(super) struct Msix {
-		_common: [u8; 2],
-		message_control: MessageControl,
-		table_offset: u32,
-		pending_bit_array_offset: u32,
+	pub const ID: u8 = 0x11;
+
+	struct_offsets! {
+		struct Msix {
+			_common: [u8; 2],
+			message_control: MessageControl,
+			table_offset: u32,
+			pending_bit_array_offset: u32,
+		}
 	}
 
 	/// Reference to an MSI-X capability structure.
 	#[derive(Clone, Copy, Debug)]
-	pub struct MsixRef(pub(super) VolatilePtr<Msix>);
+	pub struct MsixRef<P: Ptr>(pub(super) P);
 
-	impl MsixRef {
-		pub const ID: u8 = 0x11;
-
+	impl<P: Ptr> MsixRef<P> {
 		accessors! {
+			use Msix;
 			message_control: MessageControl { get; set set_message_control; }
 		}
 
-		pub fn table_bar_idx(self) -> u8 {
-			map!(self->table_offset).read() as u8 & 7
+		pub fn table_bar_idx(&self) -> u8 {
+			unsafe { self.0.offset(Msix::table_offset).read32_le() as u8 & 7 }
 		}
 
-		pub fn table_offset(self) -> u32 {
-			map!(self->table_offset).read() & 0xFFFF_FFF8
+		pub fn table_offset(&self) -> u32 {
+			unsafe { self.0.offset(Msix::table_offset).read32_le() & 0xFFFF_FFF8 }
 		}
 
-		pub fn pending_bit_array_bar_idx(self) -> u8 {
-			map!(self->pending_bit_array_offset).read() as u8 & 7
+		pub fn pending_bit_array_bar_idx(&self) -> u8 {
+			unsafe { self.0.offset(Msix::pending_bit_array_offset).read32_le() as u8 & 7 }
 		}
 
-		pub fn pending_bit_array_offset(self) -> u32 {
-			map!(self->pending_bit_array_offset).read() & 0xFFFF_FFF8
+		pub fn pending_bit_array_offset(&self) -> u32 {
+			unsafe { self.0.offset(Msix::pending_bit_array_offset).read32_le() & 0xFFFF_FFF8 }
 		}
 	}
 
@@ -390,34 +395,37 @@ pub mod msix {
 		}
 	}
 
-	impl BitField for MessageControl {
-		type Inner = u16;
+	unsafe impl ReprPrimitive for MessageControl {
+		type Repr = u16;
 	}
 }
 
 /// PCI advanced features capability structure.
 pub mod advanced_features {
-	use crate::config::{accessors, bit_accessors, BitField, VolatilePtr};
+	use crate::{
+		config::{accessors, bit_accessors, ReprPrimitive},
+		struct_offsets, Ptr,
+	};
 
-	#[derive(Debug)] // FIXME: remove
-	#[derive(Clone, Copy)]
-	#[repr(C, align(4))]
-	pub(super) struct AdvancedFeatures {
-		_common: [u8; 2],
-		_len: u8,
-		cpbs: AdvancedFeaturesCpbs,
-		control: Control,
-		status: Status,
+	pub const ID: u8 = 0x13;
+
+	struct_offsets! {
+		struct AdvancedFeatures {
+			_common: [u8; 2],
+			_len: u8,
+			cpbs: AdvancedFeaturesCpbs,
+			control: Control,
+			status: Status,
+		}
 	}
 
 	/// Reference to a PCI advanced features capability structure.
 	#[derive(Clone, Copy, Debug)]
-	pub struct AdvancedFeaturesRef(pub(super) VolatilePtr<AdvancedFeatures>);
+	pub struct AdvancedFeaturesRef<P: Ptr>(pub(super) P);
 
-	impl AdvancedFeaturesRef {
-		pub const ID: u8 = 0x13;
-
+	impl<P: Ptr> AdvancedFeaturesRef<P> {
 		accessors! {
+			use AdvancedFeatures;
 			cpbs: AdvancedFeaturesCpbs { get; }
 			control: Control { get; set set_control; }
 			status: Status { get; }
@@ -436,8 +444,8 @@ pub mod advanced_features {
 		}
 	}
 
-	impl BitField for AdvancedFeaturesCpbs {
-		type Inner = u8;
+	unsafe impl ReprPrimitive for AdvancedFeaturesCpbs {
+		type Repr = u8;
 	}
 
 	/// Control value of a
@@ -453,6 +461,10 @@ pub mod advanced_features {
 		}
 	}
 
+	unsafe impl ReprPrimitive for Control {
+		type Repr = u8;
+	}
+
 	/// Status value of a
 	/// [PCI advanced features capability structure](AdvancedFeaturesRef).
 	#[derive(Clone, Copy, Debug)]
@@ -465,7 +477,7 @@ pub mod advanced_features {
 		}
 	}
 
-	impl BitField for Status {
-		type Inner = u8;
+	unsafe impl ReprPrimitive for Status {
+		type Repr = u8;
 	}
 }

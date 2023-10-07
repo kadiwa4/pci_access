@@ -7,48 +7,48 @@ use bitflags::bitflags;
 use num_enum::TryFromPrimitive;
 
 use crate::{
-	config::{accessors, bit_accessors, BitField},
-	VolatilePtr,
+	config::{accessors, bit_accessors, ReprPrimitive},
+	struct_offsets, Ptr,
 };
 
-#[derive(Debug)] // FIXME: remove
-#[derive(Clone, Copy)]
-#[repr(C)]
-pub(super) struct Pcie {
-	_common: [u8; 2],
-	cpbs: PcieCpbs,
-	device_cpbs: DeviceCpbs,
-	device_control: DeviceControl,
-	device_status: DeviceStatus,
-	link_cpbs: LinkCpbs,
-	link_control: LinkControl,
-	link_status: LinkStatus,
-	slot_cpbs: SlotCpbs,
-	slot_control: SlotControl,
-	slot_status: SlotStatus,
-	root_control: RootControl,
-	root_cpbs: RootCpbs,
-	root_status: RootStatus,
-	device_cpbs2: DeviceCpbs2,
-	device_control2: DeviceControl2,
-	_device_status2: u16,
-	link_cpbs2: LinkCpbs2,
-	link_control2: LinkControl2,
-	link_status2: LinkStatus2,
-	slot_cpbs2: SlotCpbs2,
-	_slot_control2: u16,
-	_slot_status2: u16,
+pub const ID: u8 = 0x10;
+
+struct_offsets! {
+	struct Pcie {
+		_common: [u8; 2],
+		cpbs: PcieCpbs,
+		device_cpbs: DeviceCpbs,
+		device_control: DeviceControl,
+		device_status: DeviceStatus,
+		link_cpbs: LinkCpbs,
+		link_control: LinkControl,
+		link_status: LinkStatus,
+		slot_cpbs: SlotCpbs,
+		slot_control: SlotControl,
+		slot_status: SlotStatus,
+		root_control: RootControl,
+		root_cpbs: RootCpbs,
+		root_status: RootStatus,
+		device_cpbs2: DeviceCpbs2,
+		device_control2: DeviceControl2,
+		_device_status2: u16,
+		link_cpbs2: LinkCpbs2,
+		link_control2: LinkControl2,
+		link_status2: LinkStatus2,
+		slot_cpbs2: SlotCpbs2,
+		_slot_control2: u16,
+		_slot_status2: u16,
+	}
 }
 
 /// Reference to a PCI Express capability structure (residing in conventional
 /// PCI configuration space).
 #[derive(Clone, Copy, Debug)]
-pub struct PcieRef(pub(super) VolatilePtr<Pcie>);
+pub struct PcieRef<P: Ptr>(pub(super) P);
 
-impl PcieRef {
-	pub const ID: u8 = 0x10;
-
+impl<P: Ptr> PcieRef<P> {
 	accessors! {
+		use Pcie;
 		cpbs: PcieCpbs { get; }
 		device_cpbs: DeviceCpbs { get; }
 		device_control: DeviceControl { get; set set_device_control; }
@@ -87,8 +87,8 @@ impl PcieCpbs {
 	}
 }
 
-impl BitField for PcieCpbs {
-	type Inner = u16;
+unsafe impl ReprPrimitive for PcieCpbs {
+	type Repr = u16;
 }
 
 /// Value of [`PcieCpbs::device_port_type`].
@@ -150,8 +150,8 @@ impl DeviceCpbs {
 	}
 }
 
-impl BitField for DeviceCpbs {
-	type Inner = u32;
+unsafe impl ReprPrimitive for DeviceCpbs {
+	type Repr = u32;
 }
 
 /// Device control value of a [PCI Express capability structure](PcieRef).
@@ -188,8 +188,8 @@ impl DeviceControl {
 	}
 }
 
-impl BitField for DeviceControl {
-	type Inner = u16;
+unsafe impl ReprPrimitive for DeviceControl {
+	type Repr = u16;
 }
 
 /// Value of [`DeviceCpbs::max_payload_size`],
@@ -240,8 +240,8 @@ impl DeviceStatus {
 	}
 }
 
-impl BitField for DeviceStatus {
-	type Inner = u16;
+unsafe impl ReprPrimitive for DeviceStatus {
+	type Repr = u16;
 }
 
 impl BitAnd for DeviceStatus {
@@ -311,8 +311,8 @@ impl LinkCpbs {
 	}
 }
 
-impl BitField for LinkCpbs {
-	type Inner = u32;
+unsafe impl ReprPrimitive for LinkCpbs {
+	type Repr = u32;
 }
 
 /// Link control value of a [PCI Express capability structure](PcieRef).
@@ -345,8 +345,8 @@ impl LinkControl {
 	}
 }
 
-impl BitField for LinkControl {
-	type Inner = u16;
+unsafe impl ReprPrimitive for LinkControl {
+	type Repr = u16;
 }
 
 /// Value of [`LinkControl::drs_signaling`].
@@ -389,8 +389,8 @@ impl LinkStatus {
 	}
 }
 
-impl BitField for LinkStatus {
-	type Inner = u16;
+unsafe impl ReprPrimitive for LinkStatus {
+	type Repr = u16;
 }
 
 impl BitAnd for LinkStatus {
@@ -427,8 +427,8 @@ impl SlotCpbs {
 	}
 }
 
-impl BitField for SlotCpbs {
-	type Inner = u32;
+unsafe impl ReprPrimitive for SlotCpbs {
+	type Repr = u32;
 }
 
 /// Slot control value of a [PCI Express capability structure](PcieRef).
@@ -463,8 +463,8 @@ impl SlotControl {
 	}
 }
 
-impl BitField for SlotControl {
-	type Inner = u16;
+unsafe impl ReprPrimitive for SlotControl {
+	type Repr = u16;
 }
 
 /// Value of [`SlotControl::attention_indicator`] and
@@ -499,8 +499,8 @@ impl SlotStatus {
 	}
 }
 
-impl BitField for SlotStatus {
-	type Inner = u16;
+unsafe impl ReprPrimitive for SlotStatus {
+	type Repr = u16;
 }
 
 impl BitAnd for SlotStatus {
@@ -526,8 +526,8 @@ impl RootControl {
 	}
 }
 
-impl BitField for RootControl {
-	type Inner = u16;
+unsafe impl ReprPrimitive for RootControl {
+	type Repr = u16;
 }
 
 /// Root capabilities value of a [PCI Express capability structure](PcieRef).
@@ -541,8 +541,8 @@ impl RootCpbs {
 	}
 }
 
-impl BitField for RootCpbs {
-	type Inner = u16;
+unsafe impl ReprPrimitive for RootCpbs {
+	type Repr = u16;
 }
 
 /// Root status value of a [PCI Express capability structure](PcieRef).
@@ -560,8 +560,8 @@ impl RootStatus {
 	}
 }
 
-impl BitField for RootStatus {
-	type Inner = u32;
+unsafe impl ReprPrimitive for RootStatus {
+	type Repr = u32;
 }
 
 impl BitAnd for RootStatus {
@@ -617,8 +617,8 @@ impl DeviceCpbs2 {
 	}
 }
 
-impl BitField for DeviceCpbs2 {
-	type Inner = u32;
+unsafe impl ReprPrimitive for DeviceCpbs2 {
+	type Repr = u32;
 }
 
 bitflags! {
@@ -690,8 +690,8 @@ impl DeviceControl2 {
 	}
 }
 
-impl BitField for DeviceControl2 {
-	type Inner = u16;
+unsafe impl ReprPrimitive for DeviceControl2 {
+	type Repr = u16;
 }
 
 /// Value of [`DeviceControl2::completion_timeout_range`].
@@ -751,8 +751,8 @@ impl LinkCpbs2 {
 	}
 }
 
-impl BitField for LinkCpbs2 {
-	type Inner = u32;
+unsafe impl ReprPrimitive for LinkCpbs2 {
+	type Repr = u32;
 }
 
 /// Link control 2 value of a [PCI Express capability structure](PcieRef).
@@ -782,8 +782,8 @@ impl LinkControl2 {
 	}
 }
 
-impl BitField for LinkControl2 {
-	type Inner = u16;
+unsafe impl ReprPrimitive for LinkControl2 {
+	type Repr = u16;
 }
 
 /// Link status 2 value of a [PCI Express capability structure](PcieRef).
@@ -813,8 +813,8 @@ impl LinkStatus2 {
 	}
 }
 
-impl BitField for LinkStatus2 {
-	type Inner = u16;
+unsafe impl ReprPrimitive for LinkStatus2 {
+	type Repr = u16;
 }
 
 impl BitAnd for LinkStatus2 {
@@ -864,8 +864,8 @@ impl SlotCpbs2 {
 	}
 }
 
-impl BitField for SlotCpbs2 {
-	type Inner = u32;
+unsafe impl ReprPrimitive for SlotCpbs2 {
+	type Repr = u32;
 }
 
 fn decode_power_limit(mantissa: u8, scale_discr: u8) -> u32 {

@@ -5,78 +5,47 @@ pub mod cpb;
 use core::{
 	fmt::{self, Debug, Formatter},
 	iter::FusedIterator,
+	mem::replace,
 	ops::BitAnd,
-	ptr::NonNull,
 };
 
-use crate::{cast, map, VolatilePtr};
+use crate::{struct_offsets, Ptr, PtrExt, ReprPrimitive};
 use cpb::CpbIter;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct FuncPos(u16);
-
-impl FuncPos {
-	pub const fn new(func: u8, device: u8, bus: u8) -> Self {
-		Self((func & 7) as u16 | ((device as u16 & 0x1F) << 3) | ((bus as u16) << 8))
-	}
-
-	pub const fn func(self) -> u8 {
-		self.0 as u8 & 7
-	}
-
-	pub const fn device(self) -> u8 {
-		(self.0 >> 3) as u8 & 0x1F
-	}
-
-	pub const fn bus(self) -> u8 {
-		(self.0 >> 8) as u8
-	}
-
-	pub const fn from_ecam_offset(val: isize) -> Self {
-		Self((val >> 0x0C) as u16)
-	}
-
-	pub const fn to_ecam_offset(self) -> isize {
-		(self.0 as isize) << 0x0C
-	}
-
-	pub const fn from_cam_offset(val: i32) -> Self {
-		Self((val >> 8) as u16)
-	}
-
-	pub const fn to_cam_offset(self) -> i32 {
-		(self.0 as i32) << 8
-	}
-}
-
 macro_rules! accessors {
-	($($(#[$attr:meta])* $name:ident: $ty:ty { get $(=> $map_get:expr)?; $(set $set_name:ident;)? })+) => {
-		$(accessors!(@single $(#[$attr])* $name: $ty { get $(=> $map_get)?; $(set $set_name;)? });)+
+	{
+		use $strct:ident;
+		$($(#[$attr:meta])* $name:ident: $ty:ty { get $(=> $map_get:expr)?; $(set $set_name:ident $(=> $map_set:expr)?;)? })+
+	} => {
+		$(accessors!(@single $(#[$attr])* $strct::$name: $ty, { get $(=> $map_get)?; $(set $set_name $(=> $map_set)?;)? });)+
 	};
-	(@single $(#[$attr:meta])* $name:ident: $ty:ty { get $(=> $map_get:expr)?; $(set $set_name:ident;)? }) => {
-		accessors!(@get $(#[$attr])* $name: $ty, $($map_get)?);
-		accessors!(@set $(#[$attr])* $name: $ty, $($set_name)?);
+	(@single $(#[$attr:meta])* $strct:ident::$name:ident: $ty:ty, { get $(=> $map_get:expr)?; $(set $set_name:ident $(=> $map_set:expr)?;)? }) => {
+		accessors!(@get $(#[$attr])* $strct::$name: $ty, $($map_get)?);
+		accessors!(@set $(#[$attr])* $strct::$name: $ty, $($set_name, $($map_set)?)?);
 	};
-	(@get $(#[$attr:meta])* $name:ident: $ty:ty,) => {
+	(@get $(#[$attr:meta])* $strct:ident::$name:ident: $ty:ty,) => {
 		$(#[$attr])*
 		#[inline]
-		pub fn $name(self) -> $ty {
-			crate::map!(self->$name).read()
+		pub fn $name(&self) -> $ty {
+			unsafe { core::mem::transmute(<<$ty as ReprPrimitive>::Repr as crate::Primitive>::read_from(self.0.offset($strct::$name))) }
 		}
 	};
-	(@get $(#[$attr:meta])* $name:ident: $ty:ty, $map_get:expr) => {
+	(@get $(#[$attr:meta])* $strct:ident::$name:ident: $ty:ty, $map_get:expr) => {
 		$(#[$attr])*
 		#[inline]
-		pub fn $name(self) -> $ty {
-			$map_get(crate::map!(self->$name).read())
+		pub fn $name(&self) -> $ty {
+			$map_get(unsafe { core::mem::transmute(<<$ty as ReprPrimitive>::Repr as crate::Primitive>::read_from(self.0.offset($strct::$name))) })
 		}
 	};
-	(@set $(#[$attr:meta])* $name:ident: $ty:ty,) => {};
-	(@set $(#[$attr:meta])* $name:ident: $ty:ty, $set_name:ident) => {
+	(@set $(#[$attr:meta])* $strct:ident::$name:ident: $ty:ty,) => {};
+	(@set $(#[$attr:meta])* $strct:ident::$name:ident: $ty:ty, $set_name:ident, $($map_set:expr)?) => {
 		$(#[$attr])*
 		#[inline]
-		pub fn $set_name(self, val: $ty) {
-			crate::map!(self->$name).write(val);
+		pub fn $set_name(&self, val: $ty) {
+			$(let val = $map_set(val);)?
+			unsafe {
+				crate::Primitive::write_to(core::mem::transmute::<$ty, <$ty as ReprPrimitive>::Repr>(val), self.0.offset($strct::$name));
+			}
 		}
 	};
 }
@@ -93,29 +62,29 @@ macro_rules! bit_accessors {
 		$(#[$attr])*
 		#[inline]
 		pub fn $name(self) -> bool {
-			<Self as BitField>::Inner::from_le(self.0) & (1 << $pos) != 0
+			<Self as ReprPrimitive>::Repr::from_le(self.0) & (1 << $pos) != 0
 		}
 	};
 	(@get $(#[$attr:meta])* $name:ident: $ty:ty, $start:literal..$end:literal,) => {
 		$(#[$attr])*
 		#[inline]
 		pub fn $name(self) -> $ty {
-			crate::BitManip::bit_range(<Self as BitField>::Inner::from_le(self.0), $start..$end) as _
+			crate::BitManip::bit_range(<Self as ReprPrimitive>::Repr::from_le(self.0), $start..$end) as _
 		}
 	};
 	(@get $(#[$attr:meta])* $name:ident: $ty:ty, $start:literal..$end:literal, $map_get:expr) => {
 		$(#[$attr])*
 		#[inline]
 		pub fn $name(self) -> $ty {
-			$map_get(crate::BitManip::bit_range(<Self as BitField>::Inner::from_le(self.0), $start..$end))
+			$map_get(crate::BitManip::bit_range(<Self as ReprPrimitive>::Repr::from_le(self.0), $start..$end))
 		}
 	};
 	(@get $(#[$attr:meta])* $name:ident: $ty:ty, $start:literal..$end:literal mask,) => {
 		$(#[$attr])*
 		#[inline]
 		pub fn $name(self) -> $ty {
-			let mask: <Self as BitField>::Inner = crate::BitManip::new_bit_mask($start..$end);
-			(<Self as BitField>::Inner::from_le(self.0) & mask) as _
+			let mask: <Self as ReprPrimitive>::Repr = crate::BitManip::new_bit_mask($start..$end);
+			(<Self as ReprPrimitive>::Repr::from_le(self.0) & mask) as _
 		}
 	};
 	(@set $(#[$attr:meta])* $name:ident: $($ty:ty,)? $start:literal $(..$end:literal)?,) => {};
@@ -125,8 +94,8 @@ macro_rules! bit_accessors {
 		#[must_use]
 		pub fn $set_name(self, val: bool) -> Self {
 			Self(
-				(self.0 & !((1 as <Self as BitField>::Inner) << $pos).to_le())
-					| ((val as <Self as BitField>::Inner) << $pos).to_le()
+				(self.0 & !((1 as <Self as ReprPrimitive>::Repr) << $pos).to_le())
+					| ((val as <Self as ReprPrimitive>::Repr) << $pos).to_le()
 			)
 		}
 	};
@@ -136,8 +105,8 @@ macro_rules! bit_accessors {
 		#[must_use]
 		pub fn $set_name(self, val: $ty) -> Self {
 			debug_assert!((val as u128) < (1_u128 << ($end - $start)), "invalid {}", stringify!($name));
-			let mask: <Self as BitField>::Inner = crate::BitManip::new_bit_mask($start..$end);
-			Self((self.0 & mask.to_le()) | ((val as <Self as BitField>::Inner) << $start).to_le())
+			let mask: <Self as ReprPrimitive>::Repr = crate::BitManip::new_bit_mask($start..$end);
+			Self((self.0 & mask.to_le()) | ((val as <Self as ReprPrimitive>::Repr) << $start).to_le())
 		}
 	};
 	(@set $(#[$attr:meta])* $name:ident: $ty:ty, $start:literal..$end:literal, set $set_name:ident, $map_get:expr) => {
@@ -145,7 +114,7 @@ macro_rules! bit_accessors {
 		#[inline]
 		#[must_use]
 		pub fn $set_name(self, val: $ty) -> Self {
-			let mask: <Self as BitField>::Inner = crate::BitManip::new_bit_mask($start..$end);
+			let mask: <Self as ReprPrimitive>::Repr = crate::BitManip::new_bit_mask($start..$end);
 			Self((self.0 & mask.to_le()) | ($map_get(val) << $start).to_le())
 		}
 	};
@@ -154,7 +123,7 @@ macro_rules! bit_accessors {
 		#[inline]
 		#[must_use]
 		pub fn $set_name(self, val: $ty) -> Self {
-			let mask: <Self as BitField>::Inner = crate::BitManip::new_bit_mask($start..$end);
+			let mask: <Self as ReprPrimitive>::Repr = crate::BitManip::new_bit_mask($start..$end);
 			debug_assert_eq!(val & mask, val, "invalid {}", stringify!($name));
 			Self((self.0 & !mask.to_le()) | (val & mask).to_le())
 		}
@@ -164,87 +133,67 @@ macro_rules! bit_accessors {
 		#[inline]
 		#[must_use]
 		pub fn $set_name(self) -> Self {
-			Self(self.0 | ((1 as <Self as BitField>::Inner) << $pos).to_le())
+			Self(self.0 | ((1 as <Self as ReprPrimitive>::Repr) << $pos).to_le())
 		}
 	};
 }
 
 pub(crate) use {accessors, bit_accessors};
 
-trait BitField {
-	type Inner;
-}
-
-/// A PCI configuration space. A pointer to this is used to construct a
-/// [`HeaderRef`].
-///
-/// Size: 256 bytes, alignment: 4 bytes
-#[repr(C, align(4))]
-pub struct ConfigSpace {
-	vendor_id: u16,
-	device_id: u16,
-	command: Command,
-	status: Status,
-	revision_id: u8,
-	class_code: ClassCode,
-	cache_line_size: u8,
-	latency_timer: u8,
-	header_type: HeaderType,
-	builtin_self_test: BuiltinSelfTest,
-	_rest: [u8; 0xF0],
+struct_offsets! {
+	struct Header {
+		vendor_id: u16,
+		device_id: u16,
+		command: Command,
+		status: Status,
+		class_code: ClassCode,
+		cache_line_size: u8,
+		latency_timer: u8,
+		header_type: HeaderType,
+		builtin_self_test: BuiltinSelfTest,
+		_rest: [u8; 0xF0],
+	}
 }
 
 /// Reference to a PCI configuration space.
 #[derive(Clone, Copy)]
-pub struct HeaderRef(VolatilePtr<ConfigSpace>);
+pub struct HeaderRef<P: Ptr>(P);
 
-impl HeaderRef {
-	/// # Safety
-	/// - The input has to point to a valid PCI configuration space.
-	/// - Only one thread can access the configuration space at a time.
-	pub unsafe fn new(ptr: NonNull<ConfigSpace>) -> Self {
-		Self(VolatilePtr::new(ptr))
-	}
-
-	/// # Safety
-	/// - The input has to point to a valid PCI configuration space.
-	/// - Only one thread can access the configuration space at a time.
-	pub unsafe fn at_func_pos(ptr: NonNull<ConfigSpace>, pos: FuncPos) -> Self {
-		let ptr = NonNull::new_unchecked(ptr.as_ptr().offset(pos.to_ecam_offset()));
-		Self(VolatilePtr::new(ptr))
-	}
-
-	#[inline]
-	pub fn specific(self) -> SpecificHeaderRef {
-		match self.header_type().get() {
-			0 => SpecificHeaderRef::Type0(T0HeaderRef(cast!(self.0))),
-			1 => SpecificHeaderRef::Type1(T1HeaderRef(cast!(self.0))),
-			_ => panic!("reserved value"),
-		}
+impl<P: Ptr> HeaderRef<P> {
+	pub unsafe fn new(ptr: P) -> Self {
+		Self(ptr)
 	}
 
 	accessors! {
+		use Header;
 		vendor_id: u16 { get => u16::from_le; }
 		device_id: u16 { get => u16::from_le; }
 		command: Command { get; set set_command; }
 		status: Status { get; set set_status; }
-		revision_id: u8 { get; }
 		class_code: ClassCode { get; }
 		cache_line_size: u8 { get; set set_cache_line_size; }
 		latency_timer: u8 { get; set set_latency_timer; }
 		header_type: HeaderType { get; }
 		builtin_self_test: BuiltinSelfTest { get; set set_builtin_self_test; }
 	}
+
+	#[inline]
+	pub fn specific(&self) -> SpecificHeaderRef<P> {
+		match self.header_type().get() {
+			0 => SpecificHeaderRef::Type0(T0HeaderRef(self.0.clone())),
+			1 => SpecificHeaderRef::Type1(T1HeaderRef(self.0.clone())),
+			_ => panic!("reserved value"),
+		}
+	}
 }
 
-impl Debug for HeaderRef {
+impl<P: Ptr> Debug for HeaderRef<P> {
 	fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
 		f.debug_struct("HeaderRef")
 			.field("vendor_id", &self.vendor_id())
 			.field("device_id", &self.device_id())
 			.field("command", &self.command())
 			.field("status", &self.status())
-			.field("revision_id", &self.revision_id())
 			.field("class_code", &self.class_code())
 			.field("cache_line_size", &self.cache_line_size())
 			.field("latency_timer", &self.latency_timer())
@@ -276,8 +225,8 @@ impl Command {
 	}
 }
 
-impl BitField for Command {
-	type Inner = u16;
+unsafe impl ReprPrimitive for Command {
+	type Repr = u16;
 }
 
 /// Status value of a PCI configuration space.
@@ -304,8 +253,8 @@ impl Status {
 	}
 }
 
-impl BitField for Status {
-	type Inner = u16;
+unsafe impl ReprPrimitive for Status {
+	type Repr = u16;
 }
 
 impl BitAnd for Status {
@@ -320,13 +269,18 @@ impl BitAnd for Status {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(C)]
 pub struct ClassCode {
+	pub revision_id: u8,
 	pub programming_interface: u8,
 	pub sub_class: u8,
 	pub base_class: u8,
 }
 
+unsafe impl ReprPrimitive for ClassCode {
+	type Repr = u32;
+}
+
 /// Header type value of a PCI configuration space.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct HeaderType(u8);
 
@@ -339,8 +293,8 @@ impl HeaderType {
 	}
 }
 
-impl BitField for HeaderType {
-	type Inner = u8;
+unsafe impl ReprPrimitive for HeaderType {
+	type Repr = u8;
 }
 
 /// Built-in self test value of a PCI configuration space.
@@ -356,8 +310,8 @@ impl BuiltinSelfTest {
 	}
 }
 
-impl BitField for BuiltinSelfTest {
-	type Inner = u8;
+unsafe impl ReprPrimitive for BuiltinSelfTest {
+	type Repr = u8;
 }
 
 /// Value of [`ExpansionRom::validation_status`].
@@ -378,43 +332,45 @@ pub enum ExpansionRomValidationStatus {
 #[derive(Clone, Copy, Debug)]
 #[repr(u8)]
 #[non_exhaustive]
-pub enum SpecificHeaderRef {
-	Type0(T0HeaderRef),
-	Type1(T1HeaderRef),
+pub enum SpecificHeaderRef<P: Ptr> {
+	Type0(T0HeaderRef<P>),
+	Type1(T1HeaderRef<P>),
 }
 
-impl SpecificHeaderRef {
-	pub fn get_type(self) -> u8 {
+impl<P: Ptr> SpecificHeaderRef<P> {
+	pub fn header_type(&self) -> u8 {
 		unsafe { *(&self as *const _ as *const u8) }
 	}
 }
 
-#[repr(C)]
-struct T0Header {
-	_common0: [u8; 0x10],
-	base_addrs: [u32; 6],
-	cardbus_cis_ptr: u32,
-	subsys_vendor_id: u16,
-	subsys_id: u16,
-	expansion_rom: ExpansionRom,
-	cpbs_ptr: u8,
-	_reserved: [u8; 7],
-	interrupt_line: u8,
-	interrupt_pin: u8,
-	min_gnt: u8,
-	max_lat: u8,
+struct_offsets! {
+	struct T0Header {
+		_common0: [u8; 0x10],
+		base_addrs: [u32; 6],
+		cardbus_cis_ptr: u32,
+		subsys_vendor_id: u16,
+		subsys_id: u16,
+		expansion_rom: ExpansionRom,
+		cpbs_ptr: u8,
+		_reserved: [u8; 7],
+		interrupt_line: u8,
+		interrupt_pin: u8,
+		min_gnt: u8,
+		max_lat: u8,
+	}
 }
 
 /// Reference to a PCI configuration space with type 0 header.
 #[derive(Clone, Copy)]
-pub struct T0HeaderRef(VolatilePtr<T0Header>);
+pub struct T0HeaderRef<P: Ptr>(P);
 
-impl T0HeaderRef {
-	pub fn common(self) -> HeaderRef {
-		HeaderRef(cast!(self.0))
+impl<P: Ptr> T0HeaderRef<P> {
+	pub fn common(&self) -> HeaderRef<P> {
+		HeaderRef(self.0.clone())
 	}
 
 	accessors! {
+		use T0Header;
 		cardbus_cis_ptr: u32 { get => u32::from_le; }
 		subsys_vendor_id: u16 { get => u16::from_le; }
 		subsys_id: u16 { get => u16::from_le; }
@@ -428,21 +384,22 @@ impl T0HeaderRef {
 	/// Mutably iterates over base address registers.
 	///
 	/// Do not call this while another `BarIter` or [`Bar`] still exists.
-	pub fn bars(self) -> BarIter {
-		unsafe { BarIter::new(map!(self->base_addrs)) }
+	pub fn bars(&self) -> BarIter<P> {
+		unsafe { BarIter::new(self.0.offset(T0Header::base_addrs), 6) }
 	}
 
-	pub fn probe_expansion_rom_size(&mut self) -> u32 {
+	pub fn probe_expansion_rom_size(&self) -> u32 {
 		self.set_expansion_rom(self.expansion_rom().with_base_addr(0xFFFF_F800));
 		self.expansion_rom().base_addr().wrapping_neg()
 	}
 
-	pub fn cpbs(self) -> CpbIter {
-		CpbIter::new(self.common(), map!(self->cpbs_ptr).read())
+	pub fn cpbs(&self) -> CpbIter<P> {
+		let offset = unsafe { self.0.offset(T0Header::cpbs_ptr).read8() };
+		CpbIter::new(self.common(), offset)
 	}
 }
 
-impl Debug for T0HeaderRef {
+impl<P: Ptr> Debug for T0HeaderRef<P> {
 	fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
 		f.debug_struct("T0HeaderRef")
 			.field("bars", &self.bars())
@@ -459,48 +416,58 @@ impl Debug for T0HeaderRef {
 	}
 }
 
-#[repr(C)]
-struct T1Header {
-	_common0: [u8; 0x10],
-	base_addrs: [u32; 2],
-	primary_bus_num: u8,
-	secondary_bus_num: u8,
-	subordinate_bus_num: u8,
-	secondary_latency_timer: u8,
-	io_base_lo: u8,
-	io_limit_lo: u8,
-	secondary_status: SecondaryStatus,
-	mem_base: u16,
-	mem_limit: u16,
-	prefetchable_mem_base_lo: u16,
-	prefetchable_mem_limit_lo: u16,
-	prefetchable_mem_base_hi: u32,
-	prefetchable_mem_limit_hi: u32,
-	io_base_hi: u16,
-	io_limit_hi: u16,
-	cpbs_ptr: u8,
-	_reserved: [u8; 3],
-	expansion_rom: ExpansionRom,
-	interrupt_line: u8,
-	interrupt_pin: u8,
-	bridge_control: BridgeControl,
+struct_offsets! {
+	struct T1Header {
+		_common0: [u8; 0x10],
+		base_addrs: [u32; 2],
+		primary_bus_num: u8,
+		secondary_bus_num: u8,
+		subordinate_bus_num: u8,
+		secondary_latency_timer: u8,
+		io_base_lo: u8,
+		io_limit_lo: u8,
+		secondary_status: SecondaryStatus,
+		mem_base: u16,
+		mem_limit: u16,
+		prefetchable_mem_base_lo: u16,
+		prefetchable_mem_limit_lo: u16,
+		prefetchable_mem_base_hi: u32,
+		prefetchable_mem_limit_hi: u32,
+		io_base_hi: u16,
+		io_limit_hi: u16,
+		cpbs_ptr: u8,
+		_reserved: [u8; 3],
+		expansion_rom: ExpansionRom,
+		interrupt_line: u8,
+		interrupt_pin: u8,
+		bridge_control: BridgeControl,
+	}
 }
 
 /// Reference to a PCI configuration space with type 1 header.
 #[derive(Clone, Copy)]
-pub struct T1HeaderRef(VolatilePtr<T1Header>);
+pub struct T1HeaderRef<P: Ptr>(P);
 
-impl T1HeaderRef {
-	pub fn common(self) -> HeaderRef {
-		HeaderRef(cast!(self.0))
+impl<P: Ptr> T1HeaderRef<P> {
+	pub fn common(&self) -> HeaderRef<P> {
+		HeaderRef(self.0.clone())
 	}
 
 	accessors! {
+		use T1Header;
 		primary_bus_num: u8 { get; set set_primary_bus_num; }
 		secondary_bus_num: u8 { get; set set_secondary_bus_num; }
 		subordinate_bus_num: u8 { get; set set_subordinate_bus_num; }
 		secondary_latency_timer: u8 { get; }
+		io_base_lo: u8 { get; set set_io_base_lo; }
+		io_limit_lo: u8 { get; set set_io_limit_lo; }
 		secondary_status: SecondaryStatus { get; set set_secondary_status; }
+		prefetchable_mem_base_lo: u16 { get => u16::from_le; set set_prefetchable_mem_base_lo => u16::to_le; }
+		prefetchable_mem_limit_lo: u16 { get => u16::from_le; set set_prefetchable_mem_limit_lo => u16::to_le; }
+		prefetchable_mem_base_hi: u32 { get => u32::from_le; set set_prefetchable_mem_base_hi => u32::to_le; }
+		prefetchable_mem_limit_hi: u32 { get => u32::from_le; set set_prefetchable_mem_limit_hi => u32::to_le; }
+		io_base_hi: u16 { get => u16::from_le; set set_io_base_hi => u16::to_le; }
+		io_limit_hi: u16 { get => u16::from_le; set set_io_limit_hi => u16::to_le; }
 		expansion_rom: ExpansionRom { get; set set_expansion_rom; }
 		interrupt_line: u8 { get; set set_interrupt_line; }
 		interrupt_pin: u8 { get; }
@@ -510,154 +477,51 @@ impl T1HeaderRef {
 	/// Mutably iterates over base address registers.
 	///
 	/// Do not call this while another `BarIter` or [`Bar`] still exists.
-	pub fn bars(self) -> BarIter {
-		unsafe { BarIter::new(map!(self->base_addrs)) }
+	pub fn bars(&self) -> BarIter<P> {
+		unsafe { BarIter::new(self.0.offset(T1Header::base_addrs), 2) }
 	}
 
-	pub fn io_base(self) -> u32 {
-		let lo = map!(self->io_base_lo).read();
-		let hi = u16::from_le(map!(self->io_base_hi).read());
-		match lo & 0x0F {
-			0 => assert_eq!(hi, 0, "inconsistent I/O base"),
-			1 => (),
-			_ => panic!("reserved value"),
-		}
-
-		(hi as u32) << 0x10 | (lo as u32 & 0xF0) << 8
+	pub fn mem_base(&self) -> u32 {
+		(unsafe { self.0.offset(T1Header::mem_base).read16_le() } as u32 & 0xFFF0) << 0x10
 	}
 
-	pub fn set_io_base(self, val: u32) {
-		debug_assert_eq!(val % 0x1000, 0, "invalid I/O base");
-		let addressing_cpb = map!(self->io_base_lo).read() & 0x0F;
-		let hi = match addressing_cpb {
-			0 => {
-				debug_assert!(u16::try_from(val).is_ok(), "invalid I/O base");
-				0
-			}
-			1 => ((val >> 0x10) as u16).to_le(),
-			_ => panic!("reserved value"),
-		};
-		map!(self->io_base_lo).write((val >> 8 & 0xF0) as u8 | addressing_cpb);
-		map!(self->io_base_hi).write(hi);
-	}
-
-	/// The actual limit is `0x1000` higher than this.
-	pub fn io_limit(self) -> u32 {
-		let lo = map!(self->io_base_lo).read();
-		let hi = u16::from_le(map!(self->io_base_hi).read());
-		match lo & 0x0F {
-			0 => assert_eq!(hi, 0, "inconsistent I/O limit"),
-			1 => (),
-			_ => panic!("reserved value"),
-		}
-
-		(hi as u32) << 0x10 | (lo as u32 & 0xF0) << 8
-	}
-
-	/// The input should be the actual limit minus `0x1000`.
-	pub fn set_io_limit(self, val: u32) {
-		debug_assert_eq!(val % 0x1000, 0, "invalid I/O limit");
-		let addressing_cpb = map!(self->io_limit_lo).read() & 0x0F;
-		let hi = match addressing_cpb {
-			0 => {
-				debug_assert!(u16::try_from(val).is_ok(), "invalid I/O limit");
-				0
-			}
-			1 => ((val >> 0x10) as u16).to_le(),
-			_ => panic!("reserved value"),
-		};
-		map!(self->io_limit_lo).write((val >> 8 & 0xF0) as u8 | addressing_cpb);
-		map!(self->io_limit_hi).write(hi);
-	}
-
-	pub fn mem_base(self) -> u32 {
-		(u16::from_le(map!(self->mem_base).read()) as u32 & 0xFFF0) << 0x10
-	}
-
-	pub fn set_mem_base(self, val: u32) {
+	pub fn set_mem_base(&self, val: u32) {
 		debug_assert_eq!(val % 0x10_0000, 0, "invalid memory base");
-		map!(self->mem_base).write(((val >> 0x10) as u16).to_le());
+		unsafe {
+			self.0
+				.offset(T1Header::mem_base)
+				.write16_le((val >> 0x10) as u16);
+		}
 	}
 
 	/// The actual limit is `0x10_0000` higher than this.
-	pub fn mem_limit(self) -> u32 {
-		(u16::from_le(map!(self->mem_limit).read()) as u32 & 0xFFF0) << 0x10
+	pub fn mem_limit(&self) -> u32 {
+		(unsafe { self.0.offset(T1Header::mem_limit).read16_le() } as u32 & 0xFFF0) << 0x10
 	}
 
 	/// The input should be the actual limit minus `0x10_0000`.
-	pub fn set_mem_limit(self, val: u32) {
+	pub fn set_mem_limit(&self, val: u32) {
 		debug_assert_eq!(val % 0x10_0000, 0, "invalid memory limit");
-		map!(self->mem_limit).write(((val >> 0x10) as u16).to_le());
-	}
-
-	pub fn prefetchable_mem_base(self) -> u64 {
-		let lo = u16::from_le(map!(self->prefetchable_mem_base_lo).read());
-		let hi = u32::from_le(map!(self->prefetchable_mem_base_hi).read());
-		match lo & 0x0F {
-			0 => assert_eq!(hi, 0, "inconsistent I/O base"),
-			1 => (),
-			_ => panic!("reserved value"),
+		unsafe {
+			self.0
+				.offset(T1Header::mem_limit)
+				.write16_le((val >> 0x10) as u16);
 		}
-
-		(hi as u64) << 0x20 | (lo as u64 & 0xFFF0) << 0x10
-	}
-
-	pub fn set_prefetchable_mem_base(self, val: u64) {
-		debug_assert_eq!(val % 0x10_0000, 0, "invalid I/O base");
-		let addressing_cpb = u16::from_le(map!(self->prefetchable_mem_base_lo).read()) & 0x0F;
-		let hi = match addressing_cpb {
-			0 => {
-				debug_assert!(u32::try_from(val).is_ok(), "invalid I/O base");
-				0
-			}
-			1 => ((val >> 0x20) as u32).to_le(),
-			_ => panic!("reserved value"),
-		};
-		map!(self->prefetchable_mem_base_lo).write((val >> 0x10 & 0xFFF0) as u16 | addressing_cpb);
-		map!(self->prefetchable_mem_base_hi).write(hi);
-	}
-
-	/// The actual limit is `0x10_0000` higher than this.
-	pub fn prefetchable_mem_limit(self) -> u64 {
-		let lo = u16::from_le(map!(self->prefetchable_mem_limit_lo).read());
-		let hi = u32::from_le(map!(self->prefetchable_mem_limit_hi).read());
-		match lo & 0x0F {
-			0 => assert_eq!(hi, 0, "inconsistent I/O limit"),
-			1 => (),
-			_ => panic!("reserved value"),
-		}
-
-		(hi as u64) << 0x20 | (lo as u64 & 0xFFF0) << 0x10
-	}
-
-	/// The input should be the actual limit minus `0x10_0000`.
-	pub fn set_prefetchable_mem_limit(self, val: u64) {
-		debug_assert_eq!(val % 0x10_0000, 0, "invalid I/O limit");
-		let addressing_cpb = u16::from_le(map!(self->prefetchable_mem_limit_lo).read()) & 0x0F;
-		let hi = match addressing_cpb {
-			0 => {
-				debug_assert!(u32::try_from(val).is_ok(), "invalid I/O limit");
-				0
-			}
-			1 => ((val >> 0x20) as u32).to_le(),
-			_ => panic!("reserved value"),
-		};
-		map!(self->prefetchable_mem_limit_lo).write((val >> 0x10 & 0xFFF0) as u16 | addressing_cpb);
-		map!(self->prefetchable_mem_limit_hi).write(hi);
 	}
 
 	/// Iterates over PCI capabilities.
-	pub fn cpbs(self) -> CpbIter {
-		CpbIter::new(self.common(), map!(self->cpbs_ptr).read())
+	pub fn cpbs(&self) -> CpbIter<P> {
+		let offset = unsafe { self.0.offset(T1Header::cpbs_ptr).read8() };
+		CpbIter::new(self.common(), offset)
 	}
 
-	pub fn probe_expansion_rom_size(&mut self) -> u32 {
+	pub fn probe_expansion_rom_size(&self) -> u32 {
 		self.set_expansion_rom(self.expansion_rom().with_base_addr(0xFFFF_F800));
 		self.expansion_rom().base_addr().wrapping_neg()
 	}
 }
 
-impl Debug for T1HeaderRef {
+impl<P: Ptr> Debug for T1HeaderRef<P> {
 	fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
 		f.debug_struct("T1HeaderRef")
 			.field("bars", &self.bars())
@@ -665,13 +529,23 @@ impl Debug for T1HeaderRef {
 			.field("secondary_bus_num", &self.secondary_bus_num())
 			.field("subordinate_bus_num", &self.subordinate_bus_num())
 			.field("secondary_latency_timer", &self.secondary_latency_timer())
-			.field("io_base", &self.io_base())
-			.field("io_limit", &self.io_limit())
+			.field("io_base_lo", &self.io_base_lo())
+			.field("io_limit_lo", &self.io_limit_lo())
 			.field("secondary_status", &self.secondary_status())
 			.field("mem_base", &self.mem_base())
 			.field("mem_limit", &self.mem_limit())
-			.field("prefetchable_mem_base", &self.prefetchable_mem_base())
-			.field("prefetchable_mem_limit", &self.prefetchable_mem_limit())
+			.field("prefetchable_mem_base_lo", &self.prefetchable_mem_base_lo())
+			.field(
+				"prefetchable_mem_limit_lo",
+				&self.prefetchable_mem_limit_lo(),
+			)
+			.field("prefetchable_mem_base_hi", &self.prefetchable_mem_base_hi())
+			.field(
+				"prefetchable_mem_limit_hi",
+				&self.prefetchable_mem_limit_hi(),
+			)
+			.field("io_base_hi", &self.io_base_hi())
+			.field("io_limit_hi", &self.io_limit_hi())
 			.field("cpbs", &self.cpbs())
 			.field("expansion_rom", &self.expansion_rom())
 			.field("interrupt_line", &self.interrupt_line())
@@ -703,8 +577,8 @@ impl SecondaryStatus {
 	}
 }
 
-impl BitField for SecondaryStatus {
-	type Inner = u16;
+unsafe impl ReprPrimitive for SecondaryStatus {
+	type Repr = u16;
 }
 
 impl BitAnd for SecondaryStatus {
@@ -738,52 +612,48 @@ impl BridgeControl {
 	}
 }
 
-impl BitField for BridgeControl {
-	type Inner = u16;
+unsafe impl ReprPrimitive for BridgeControl {
+	type Repr = u16;
 }
 
 /// Mutably iterates over base address registers.
-pub struct BarIter {
-	start: VolatilePtr<u32>,
-	end: VolatilePtr<u32>,
+#[derive(Clone)]
+pub struct BarIter<P: Ptr> {
+	start: P,
+	end: P,
 }
 
-impl BarIter {
+impl<P: Ptr> BarIter<P> {
 	/// # Safety
 	/// The input has to point to a valid array.
-	unsafe fn new<const N: usize>(ptr: VolatilePtr<[u32; N]>) -> Self {
-		let start = cast!(ptr);
+	unsafe fn new(ptr: P, len: i32) -> Self {
 		Self {
-			start,
-			end: map!((start)[N]),
+			end: ptr.offset(len << 2),
+			start: ptr,
 		}
 	}
 }
 
-impl Iterator for BarIter {
-	type Item = Bar;
+impl<P: Ptr> Iterator for BarIter<P> {
+	type Item = Bar<P>;
 
 	fn next(&mut self) -> Option<Self::Item> {
-		if self.start.as_raw_ptr() == self.end.as_raw_ptr() {
+		if self.start == self.end {
 			return None;
 		}
-		let ptr = self.start;
-		self.start = map!((ptr)[1]);
-		let lo_le = ptr.read();
+		let next_ptr = unsafe { self.start.offset(4) };
+		let ptr = replace(&mut self.start, next_ptr);
+		let lo_le = unsafe { ptr.read32() };
 		let lo = u32::from_le(lo_le);
 		if lo & 1 != 0 {
 			return Some(Bar::IoSpace(IoBarRef(ptr), lo));
 		}
 		let val = match lo & 6 {
-			0 => Bar::MemSpace32(Mem32BarRef(cast!(ptr)), Mem32BaseAddr(lo_le)),
+			0 => Bar::MemSpace32(Mem32BarRef(ptr), Mem32BaseAddr(lo_le)),
 			4 => {
-				assert_ne!(
-					self.start.as_raw_ptr(),
-					self.end.as_raw_ptr(),
-					"invalid 64-bit BAR"
-				);
-				let hi = self.start.read();
-				self.start = map!((self.start)[1]);
+				assert_ne!(self.start, self.end, "invalid 64-bit BAR");
+				let hi = unsafe { self.start.read32() };
+				self.start = unsafe { ptr.offset(4) };
 				Bar::MemSpace64(Mem64BarRef(ptr), Mem64BaseAddr::new(lo_le, hi))
 			}
 			_ => panic!("reserved value"),
@@ -792,41 +662,39 @@ impl Iterator for BarIter {
 	}
 }
 
-impl FusedIterator for BarIter {}
+impl<P: Ptr> FusedIterator for BarIter<P> {}
 
-impl Debug for BarIter {
+impl<P: Ptr> Debug for BarIter<P> {
 	fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-		let clone = Self {
-			start: self.start,
-			end: self.end,
-		};
-		f.debug_list().entries(clone).finish()
+		f.debug_list().entries(self.clone()).finish()
 	}
 }
 
 /// Base address register.
-#[derive(Debug)]
 #[non_exhaustive]
-pub enum Bar {
-	MemSpace32(Mem32BarRef, Mem32BaseAddr),
-	MemSpace64(Mem64BarRef, Mem64BaseAddr),
-	IoSpace(IoBarRef, u32),
+#[derive(Clone, Copy, Debug)]
+pub enum Bar<P: Ptr> {
+	MemSpace32(Mem32BarRef<P>, Mem32BaseAddr),
+	MemSpace64(Mem64BarRef<P>, Mem64BaseAddr),
+	IoSpace(IoBarRef<P>, u32),
 }
 
 /// Reference to base address register containing a 32-bit memory address.
-#[derive(Debug)]
-pub struct Mem32BarRef(VolatilePtr<Mem32BaseAddr>);
+#[derive(Clone, Copy, Debug)]
+pub struct Mem32BarRef<P: Ptr>(P);
 
-impl Mem32BarRef {
+impl<P: Ptr> Mem32BarRef<P> {
 	pub fn read(&self) -> Mem32BaseAddr {
-		self.0.read()
+		unsafe { Mem32BaseAddr(self.0.read32()) }
 	}
 
-	pub fn write(&mut self, val: Mem32BaseAddr) {
-		self.0.write(val);
+	pub fn write(&self, val: Mem32BaseAddr) {
+		unsafe {
+			self.0.write32(val.0);
+		}
 	}
 
-	pub fn probe_size(&mut self) -> u32 {
+	pub fn probe_size(&self) -> u32 {
 		self.write(self.read().with_addr(0xFFFF_FFF0));
 		self.read().addr().wrapping_neg()
 	}
@@ -844,28 +712,30 @@ impl Mem32BaseAddr {
 	}
 }
 
-impl BitField for Mem32BaseAddr {
-	type Inner = u32;
+unsafe impl ReprPrimitive for Mem32BaseAddr {
+	type Repr = u32;
 }
 
 /// Reference to base address register containing a 64-bit memory address.
-#[derive(Debug)]
-pub struct Mem64BarRef(VolatilePtr<u32>);
+#[derive(Clone, Copy, Debug)]
+pub struct Mem64BarRef<P: Ptr>(P);
 
-impl Mem64BarRef {
+impl<P: Ptr> Mem64BarRef<P> {
 	#[inline]
 	pub fn read(&self) -> Mem64BaseAddr {
-		Mem64BaseAddr::new(self.0.read(), map!((self.0)[1]).read())
+		unsafe { Mem64BaseAddr::new(self.0.read32(), self.0.offset(4).read32()) }
 	}
 
 	#[inline]
-	pub fn write(&mut self, val: Mem64BaseAddr) {
+	pub fn write(&self, val: Mem64BaseAddr) {
 		let [a, b, c, d, e, f, g, h] = val.0.to_ne_bytes();
-		map!((self.0)[0]).write(u32::from_ne_bytes([a, b, c, d]));
-		map!((self.0)[1]).write(u32::from_ne_bytes([e, f, g, h]));
+		unsafe {
+			self.0.write32(u32::from_ne_bytes([a, b, c, d]));
+			self.0.offset(4).write32(u32::from_ne_bytes([e, f, g, h]));
+		}
 	}
 
-	pub fn probe_size(&mut self) -> u64 {
+	pub fn probe_size(&self) -> u64 {
 		self.write(self.read().with_addr(0xFFFF_FFFF_FFFF_FFF0));
 		self.read().addr().wrapping_neg()
 	}
@@ -890,29 +760,31 @@ impl Mem64BaseAddr {
 	}
 }
 
-impl BitField for Mem64BaseAddr {
-	type Inner = u64;
+unsafe impl ReprPrimitive for Mem64BaseAddr {
+	type Repr = u64;
 }
 
 /// Reference to a base address register containing a 32-bit I/O address.
-#[derive(Debug)]
-pub struct IoBarRef(VolatilePtr<u32>);
+#[derive(Clone, Copy, Debug)]
+pub struct IoBarRef<P: Ptr>(P);
 
-impl IoBarRef {
+impl<P: Ptr> IoBarRef<P> {
 	#[inline]
 	pub fn read(&self) -> u32 {
-		u32::from_le(self.0.read()) & 0xFFFF_FFFC
+		unsafe { self.0.read32_le() & 0xFFFF_FFFC }
 	}
 
 	#[inline]
-	pub fn write(&mut self, val: u32) {
+	pub fn write(&self, val: u32) {
 		debug_assert_eq!(val % 4, 0, "invalid addr");
-		self.0.write(((val & 0xFFFF_FFFC) | 1).to_le());
+		unsafe {
+			self.0.write32_le((val & 0xFFFF_FFFC) | 1);
+		}
 	}
 
 	#[inline]
-	pub fn probe_size(&mut self) -> u32 {
-		self.0.write(0xFFFF_FFFD_u32.to_le());
+	pub fn probe_size(&self) -> u32 {
+		self.write(0xFFFF_FFFC_u32);
 		self.read().wrapping_neg()
 	}
 }
@@ -933,6 +805,6 @@ impl ExpansionRom {
 	}
 }
 
-impl BitField for ExpansionRom {
-	type Inner = u32;
+unsafe impl ReprPrimitive for ExpansionRom {
+	type Repr = u32;
 }

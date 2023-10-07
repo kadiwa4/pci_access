@@ -3,184 +3,195 @@
 use core::{
 	fmt::{self, Debug, Formatter},
 	iter::FusedIterator,
+	mem::replace,
 };
 
 use num_enum::TryFromPrimitive;
 
 use crate::{
-	cast,
-	config::{accessors, bit_accessors, BitField},
-	map, VolatilePtr,
+	config::{accessors, bit_accessors, ReprPrimitive},
+	struct_offsets, Ptr, PtrExt,
 };
 
-#[derive(Debug)] // FIXME: remove
-#[derive(Clone, Copy)]
-#[repr(C, align(4))]
-pub(super) struct Part0 {
-	_common: [u8; 2],
-	entry_count: u8,
-	_reserved: u8,
+pub const ID: u8 = 0x14;
+
+struct_offsets! {
+	struct Part0 {
+		_common: [u8; 2],
+		entry_count: u8,
+		_reserved: u8,
+	}
 }
 
-#[derive(Clone, Copy)]
-#[repr(C, align(4))]
-struct Part1 {
-	secondary_bus_num: u8,
-	subordinate_bus_num: u8,
-	_reserved: [u8; 2],
+struct_offsets! {
+	struct Part1 {
+		secondary_bus_num: u8,
+		subordinate_bus_num: u8,
+		_reserved: [u8; 2],
+	}
 }
 
-#[derive(Clone, Copy)]
-#[repr(C)]
-struct EnhancedAllocT0 {
-	part0: Part0,
-	array: [Entry; 0],
+struct_offsets! {
+	struct EnhancedAllocT0 {
+		_part0: [u8; 4],
+		array: [Entry; 0],
+	}
 }
 
-#[derive(Clone, Copy)]
-#[repr(C)]
-struct EnhancedAllocT1 {
-	part0: Part0,
-	part1: Part1,
-	array: [Entry; 0],
+struct_offsets! {
+	struct EnhancedAllocT1 {
+		_part0: [u8; 4],
+		part1: [u8; 4],
+		array: [Entry; 0],
+	}
 }
 
 /// Reference to an enhanced allocation capability structure.
 #[derive(Clone, Copy, Debug)]
-pub struct EnhancedAllocRef {
-	pub(super) ptr: VolatilePtr<Part0>,
+pub struct EnhancedAllocRef<P: Ptr> {
+	pub(super) ptr: P,
 	pub(super) type1: bool,
 }
 
-impl EnhancedAllocRef {
-	pub const ID: u8 = 0x14;
-
+impl<P: Ptr> EnhancedAllocRef<P> {
 	#[inline]
-	fn part1(self) -> Option<VolatilePtr<Part1>> {
+	fn part1(&self) -> Option<P> {
 		self.type1
-			.then(|| map!((cast!(self.ptr => EnhancedAllocT1)).part1))
+			.then(|| unsafe { self.ptr.offset(EnhancedAllocT1::part1) })
 	}
 
 	/// Returns `None` if the configuration space header is of type 0.
 	#[inline]
-	pub fn secondary_bus_num(self) -> Option<u8> {
-		self.part1().map(|p| map!(p.secondary_bus_num).read())
+	pub fn secondary_bus_num(&self) -> Option<u8> {
+		self.part1()
+			.map(|p| unsafe { p.offset(Part1::secondary_bus_num).read8() })
 	}
 
 	/// Returns `None` if the configuration space header is of type 0.
 	#[inline]
-	pub fn subordinate_bus_num(self) -> Option<u8> {
-		self.part1().map(|p| map!(p.subordinate_bus_num).read())
+	pub fn subordinate_bus_num(&self) -> Option<u8> {
+		self.part1()
+			.map(|p| unsafe { p.offset(Part1::subordinate_bus_num).read8() })
 	}
 
-	pub fn entries(self) -> EntriesIter {
-		let ptr = if self.type1 {
-			map!((cast!(self.ptr => EnhancedAllocT1)).array)
+	pub fn entries(&self) -> EntriesIter<P> {
+		let offset = if self.type1 {
+			EnhancedAllocT1::array
 		} else {
-			map!((cast!(self.ptr => EnhancedAllocT0)).array)
+			EnhancedAllocT0::array
 		};
+		let ptr = unsafe { self.ptr.offset(offset) };
 		EntriesIter {
-			current: cast!(ptr),
-			remaining_len: map!((self.ptr).entry_count).read() as usize & 0x3F,
+			current: ptr,
+			remaining_len: unsafe { self.ptr.offset(Part0::entry_count).read8() } as usize & 0x3F,
 		}
 	}
 }
 
 /// Mutably iterates over enhanced allocation [entries](EntryRef).
 #[derive(Clone)]
-pub struct EntriesIter {
-	current: VolatilePtr<Entry>,
+pub struct EntriesIter<P: Ptr> {
+	current: P,
 	remaining_len: usize,
 }
 
-impl Iterator for EntriesIter {
-	type Item = EntryRef;
+impl<P: Ptr> Iterator for EntriesIter<P> {
+	type Item = EntryRef<P>;
 
 	fn next(&mut self) -> Option<Self::Item> {
 		if self.remaining_len == 0 {
 			return None;
 		}
 		self.remaining_len -= 1;
-		let ptr = self.current;
-		let offset = 1 + (map!((self.current).header).read().0 & 7) as isize;
-		self.current = map!((self.current)[offset]);
-		Some(EntryRef(ptr))
+		let offset = 1 + (unsafe { self.current.offset(Entry::header).read32() } & 7) as i32;
+		let next_ptr = unsafe { self.current.offset(offset << 2) };
+		Some(EntryRef(replace(&mut self.current, next_ptr)))
 	}
 }
 
-impl FusedIterator for EntriesIter {}
+impl<P: Ptr> FusedIterator for EntriesIter<P> {}
 
-impl Debug for EntriesIter {
+impl<P: Ptr> Debug for EntriesIter<P> {
 	fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
 		f.debug_list().entries(self.clone()).finish()
 	}
 }
 
-#[derive(Debug)] // FIXME: remove
-#[derive(Clone, Copy)]
-#[repr(C)]
-struct Entry {
-	header: EntryHeader,
-	start_lo: u32,
-	end_lo: u32,
-	hi0: u32,
-	hi1: u32,
+struct_offsets! {
+	struct Entry {
+		header: EntryHeader,
+		start_lo: u32,
+		end_lo: u32,
+		hi0: u32,
+		hi1: u32,
+	}
 }
 
 /// Entry in an [enhanced allocation capability structure](EnhancedAllocRef).
 #[derive(Clone, Copy, Debug)]
-pub struct EntryRef(VolatilePtr<Entry>);
+pub struct EntryRef<P: Ptr>(P);
 
-impl EntryRef {
+impl<P: Ptr> EntryRef<P> {
 	accessors! {
+		use Entry;
 		header: EntryHeader { get; set set_header; }
 	}
 
-	pub fn start_addr(self) -> u64 {
-		let mut ret = u32::from_le(map!(self->start_lo).read()) as u64;
-		if ret & 2 != 0 {
-			ret |= (u32::from_le(map!(self->hi0).read()) as u64) << 0x20;
+	pub fn start_addr(&self) -> u64 {
+		unsafe {
+			let mut ret = self.0.offset(Entry::start_lo).read32_le() as u64;
+			if ret & 2 != 0 {
+				ret |= (self.0.offset(Entry::hi0).read32_le() as u64) << 0x20;
+			}
+			ret & 0xFFFF_FFFF_FFFF_FFFC
 		}
-		ret & 0xFFFF_FFFF_FFFF_FFFC
 	}
 
-	pub fn set_start_addr(self, val: u64) {
+	pub fn set_start_addr(&self, val: u64) {
 		debug_assert_eq!(val % 4, 0, "invalid start_addr");
-		let use_hi = u32::from_le(map!(self->start_lo).read()) & 2 != 0;
-		map!(self->start_lo).write((val as u32).to_le());
-		if use_hi {
-			map!(self->hi0).write(((val >> 0x20) as u32).to_le());
-		} else {
-			debug_assert!(u32::try_from(val).is_ok(), "invalid start_addr");
+		unsafe {
+			let use_hi = self.0.offset(Entry::start_lo).read32_le() & 2 != 0;
+			self.0.offset(Entry::start_lo).write32_le(val as u32);
+			if use_hi {
+				self.0.offset(Entry::hi0).write32_le((val >> 0x20) as u32);
+			} else {
+				debug_assert!(u32::try_from(val).is_ok(), "invalid start_addr");
+			}
 		}
 	}
 	/// The actual end address is `4` higher than this.
-	pub fn end_addr(self) -> u64 {
-		let mut ret = u32::from_le(map!(self->end_lo).read()) as u64;
-		if ret & 2 != 0 {
-			ret |= (u32::from_le(self.end_hi_ptr().read()) as u64) << 0x20;
+	pub fn end_addr(&self) -> u64 {
+		unsafe {
+			let mut ret = self.0.offset(Entry::end_lo).read32_le() as u64;
+			if ret & 2 != 0 {
+				ret |= (self.end_hi_ptr().read32_le() as u64) << 0x20;
+			}
+			ret & 0xFFFF_FFFF_FFFF_FFFC
 		}
-		ret & 0xFFFF_FFFF_FFFF_FFFC
 	}
 
 	/// The input should be the actual end address minus `4`.
-	pub fn set_end_addr(self, val: u64) {
+	pub fn set_end_addr(&self, val: u64) {
 		debug_assert_eq!(val % 4, 0, "invalid end_addr");
-		let use_hi = u32::from_le(map!(self->end_lo).read()) & 2 != 0;
-		map!(self->end_lo).write((val as u32).to_le());
-		if use_hi {
-			self.end_hi_ptr().write(((val >> 0x20) as u32).to_le());
-		} else {
-			debug_assert!(u32::try_from(val).is_ok(), "invalid end_addr");
+		unsafe {
+			let use_hi = self.0.offset(Entry::end_lo).read32_le() & 2 != 0;
+			self.0.offset(Entry::end_lo).write32_le(val as u32);
+			if use_hi {
+				self.end_hi_ptr().write32_le((val >> 0x20) as u32);
+			} else {
+				debug_assert!(u32::try_from(val).is_ok(), "invalid end_addr");
+			}
 		}
 	}
 
-	fn end_hi_ptr(self) -> VolatilePtr<u32> {
-		let start_lo = u32::from_le(map!(self->start_lo).read()) as u64;
-		if start_lo & 2 != 0 {
-			map!(self->hi1)
-		} else {
-			map!(self->hi0)
+	fn end_hi_ptr(&self) -> P {
+		unsafe {
+			let start_lo = self.0.offset(Entry::start_lo).read32_le();
+			if start_lo & 2 != 0 {
+				self.0.offset(Entry::hi1)
+			} else {
+				self.0.offset(Entry::hi0)
+			}
 		}
 	}
 }
@@ -206,8 +217,8 @@ impl EntryHeader {
 	}
 }
 
-impl BitField for EntryHeader {
-	type Inner = u32;
+unsafe impl ReprPrimitive for EntryHeader {
+	type Repr = u32;
 }
 
 /// Value of [`EntryHeader::equivalent_bar`].

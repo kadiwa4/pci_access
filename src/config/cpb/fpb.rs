@@ -3,34 +3,34 @@
 use num_enum::TryFromPrimitive;
 
 use crate::{
-	config::{accessors, bit_accessors, BitField},
-	map, VolatilePtr,
+	config::{accessors, bit_accessors, ReprPrimitive},
+	struct_offsets, Ptr, PtrExt,
 };
 
-#[derive(Debug)] // FIXME: remove
-#[derive(Clone, Copy)]
-#[repr(C)]
-pub(super) struct Fpb {
-	_common: [u8; 2],
-	_reserved: [u8; 2],
-	cpbs: FpbCpbs,
-	rid_vector_control1: RidVectorControl1,
-	rid_vector_control2: RidVectorControl2,
-	mem_lo_vector_control: MemLoVectorControl,
-	mem_hi_vector_control: MemHiVectorControl,
-	mem_hi_vector_start_addr_hi: u32,
-	vector_access_control: u32,
-	vector_access_data: u32,
+pub const ID: u8 = 0x15;
+
+struct_offsets! {
+	struct Fpb {
+		_common: [u8; 2],
+		_reserved: [u8; 2],
+		cpbs: FpbCpbs,
+		rid_vector_control1: RidVectorControl1,
+		rid_vector_control2: RidVectorControl2,
+		mem_lo_vector_control: MemLoVectorControl,
+		mem_hi_vector_control: MemHiVectorControl,
+		mem_hi_vector_start_addr_hi: u32,
+		vector_access_control: u32,
+		vector_access_data: u32,
+	}
 }
 
 /// Reference to a flattening portal bridge capability structure.
 #[derive(Clone, Copy, Debug)]
-pub struct FpbRef(pub(super) VolatilePtr<Fpb>);
+pub struct FpbRef<P: Ptr>(pub(super) P);
 
-impl FpbRef {
-	pub const ID: u8 = 0x15;
-
+impl<P: Ptr> FpbRef<P> {
 	accessors! {
+		use Fpb;
 		cpbs: FpbCpbs { get; }
 		rid_vector_control1: RidVectorControl1 { get; set set_rid_vector_control1; }
 		rid_vector_control2: RidVectorControl2 { get; set set_rid_vector_control2; }
@@ -38,41 +38,51 @@ impl FpbRef {
 		mem_hi_vector_control: MemHiVectorControl { get; set set_mem_hi_vector_control; }
 	}
 
-	pub fn mem_hi_vector_start_addr(self) -> u64 {
+	pub fn mem_hi_vector_start_addr(&self) -> u64 {
 		let lo = u32::from_le(self.mem_hi_vector_control().0) & 0xF000_0000;
-		let hi = u32::from_le(map!(self->mem_hi_vector_start_addr_hi).read());
+		let hi = unsafe { self.0.offset(Fpb::mem_hi_vector_start_addr_hi).read32_le() };
 		((hi as u64) << 0x20) | lo as u64
 	}
 
-	pub fn set_mem_hi_vector_start_addr(self, val: u64) {
+	pub fn set_mem_hi_vector_start_addr(&self, val: u64) {
 		debug_assert_eq!(val % 0x1000_0000, 0, "invalid mem_hi_vector_start_addr");
 		self.set_mem_hi_vector_control(MemHiVectorControl(
 			(self.mem_hi_vector_control().0 & 0x0FFF_FFFF_u32.to_le())
 				| (val as u32 & 0xF000_0000).to_le(),
 		));
-		map!(self->mem_hi_vector_start_addr_hi).write(((val >> 0x20) as u32).to_le());
+		unsafe {
+			self.0
+				.offset(Fpb::mem_hi_vector_start_addr_hi)
+				.write32_le((val >> 0x20) as u32);
+		}
 	}
 
-	pub fn vector_read(self, select: VectorSelect, offset: u8) -> u32 {
+	pub fn vector_read(&self, select: VectorSelect, offset: u8) -> u32 {
 		self.set_vector_access_control(select, offset);
-		u32::from_le(map!(self->vector_access_data).read())
+		unsafe { self.0.offset(Fpb::vector_access_data).read32_le() }
 	}
 
-	pub fn vector_write(self, select: VectorSelect, offset: u8, val: u32) {
+	pub fn vector_write(&self, select: VectorSelect, offset: u8, val: u32) {
 		self.set_vector_access_control(select, offset);
-		map!(self->vector_access_data).write(val.to_le());
+		unsafe {
+			self.0.offset(Fpb::vector_access_data).write32_le(val);
+		}
 	}
 
-	pub fn vector_replace(self, select: VectorSelect, offset: u8, val: u32) -> u32 {
+	pub fn vector_replace(&self, select: VectorSelect, offset: u8, val: u32) -> u32 {
 		self.set_vector_access_control(select, offset);
-		let ret = u32::from_le(map!(self->vector_access_data).read());
-		map!(self->vector_access_data).write(val.to_le());
-		ret
+		unsafe {
+			let ret = self.0.offset(Fpb::vector_access_data).read32_le();
+			self.0.offset(Fpb::vector_access_data).write32_le(val);
+			ret
+		}
 	}
 
-	fn set_vector_access_control(self, select: VectorSelect, offset: u8) {
+	fn set_vector_access_control(&self, select: VectorSelect, offset: u8) {
 		let val = ((select as u32) << 0x0E) | offset as u32;
-		map!(self->vector_access_control).write(val.to_le());
+		unsafe {
+			self.0.offset(Fpb::vector_access_control).write32_le(val);
+		}
 	}
 }
 
@@ -118,8 +128,8 @@ impl FpbCpbs {
 	}
 }
 
-impl BitField for FpbCpbs {
-	type Inner = u32;
+unsafe impl ReprPrimitive for FpbCpbs {
+	type Repr = u32;
 }
 
 /// RID vector control 1 value of a
@@ -145,8 +155,8 @@ impl RidVectorControl1 {
 	}
 }
 
-impl BitField for RidVectorControl1 {
-	type Inner = u32;
+unsafe impl ReprPrimitive for RidVectorControl1 {
+	type Repr = u32;
 }
 
 /// Value of [`RidVectorControl1::granularity`].
@@ -187,8 +197,8 @@ impl RidVectorControl2 {
 	}
 }
 
-impl BitField for RidVectorControl2 {
-	type Inner = u32;
+unsafe impl ReprPrimitive for RidVectorControl2 {
+	type Repr = u32;
 }
 
 /// MEM low vector control value of a
@@ -208,8 +218,8 @@ impl MemLoVectorControl {
 	}
 }
 
-impl BitField for MemLoVectorControl {
-	type Inner = u32;
+unsafe impl ReprPrimitive for MemLoVectorControl {
+	type Repr = u32;
 }
 
 /// Value of [`MemLoVectorControl::granularity`].
@@ -250,8 +260,8 @@ impl MemHiVectorControl {
 	}
 }
 
-impl BitField for MemHiVectorControl {
-	type Inner = u32;
+unsafe impl ReprPrimitive for MemHiVectorControl {
+	type Repr = u32;
 }
 
 /// Value of [`MemHiVectorControl::granularity`].

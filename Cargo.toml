@@ -11,4 +11,3 @@ license = "MIT"
 [dependencies]
 bitflags = "2.4.0"
 num_enum = { version = "0.7.0", default-features = false }
-volatile = "0.5.1"
