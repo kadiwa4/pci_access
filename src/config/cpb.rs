@@ -12,7 +12,7 @@ use core::{
 };
 
 use super::HeaderRef;
-use crate::Ptr;
+use crate::{Ptr, TPtr};
 
 #[repr(C, align(2))]
 struct CpbHeader {
@@ -32,7 +32,7 @@ impl<P: Ptr> CpbIter<P> {
 	pub(super) fn new(header: HeaderRef<P>, offset: u8) -> Self {
 		Self {
 			type1: header.header_type().get() == 1,
-			header_ptr: header.0,
+			header_ptr: header.0 .0,
 			current_offset: offset & 0xFC,
 		}
 	}
@@ -51,7 +51,7 @@ impl<P: Ptr> Iterator for CpbIter<P> {
 			self.current_offset = cpb_header.next_ptr & 0xFC;
 			if cpb_header.id != 0 {
 				return Some(Cpb {
-					ptr,
+					ptr: unsafe { TPtr::new(ptr) },
 					type1: self.type1,
 				});
 			}
@@ -70,60 +70,60 @@ impl<P: Ptr> Debug for CpbIter<P> {
 /// PCI capability structure of any type. Use the methods to get a specific one.
 #[derive(Clone, Copy)]
 pub struct Cpb<P: Ptr> {
-	ptr: P,
+	ptr: TPtr<P, CpbHeader>,
 	type1: bool,
 }
 
 impl<P: Ptr> Cpb<P> {
 	pub fn id(&self) -> u8 {
-		unsafe { self.ptr.read8() }
+		unsafe { self.ptr.cast::<u8>() }.read()
 	}
 
 	pub fn power_management(&self) -> Option<power_management::PowerManagementRef<P>> {
 		(self.id() == power_management::ID)
-			.then(|| power_management::PowerManagementRef(self.ptr.clone()))
+			.then(|| power_management::PowerManagementRef(unsafe { self.ptr.cast() }))
 	}
 
 	pub fn vpd(&self) -> Option<vpd::VpdRef<P>> {
-		(self.id() == vpd::ID).then(|| vpd::VpdRef(self.ptr.clone()))
+		(self.id() == vpd::ID).then(|| vpd::VpdRef(unsafe { self.ptr.cast() }))
 	}
 
 	pub fn msi(&self) -> Option<msi::MsiRef<P>> {
-		(self.id() == msi::ID).then(|| msi::MsiRef::new(self.ptr.clone()))
+		(self.id() == msi::ID).then(|| msi::MsiRef::new(unsafe { self.ptr.cast() }))
 	}
 
 	pub fn vendor_specific(&self) -> Option<vendor_specific::VendorSpecificRef<P>> {
 		(self.id() == vendor_specific::ID)
-			.then(|| vendor_specific::VendorSpecificRef(self.ptr.clone()))
+			.then(|| vendor_specific::VendorSpecificRef(unsafe { self.ptr.cast() }))
 	}
 
 	pub fn bridge_subsys_id(&self) -> Option<bridge_subsys_id::BridgeSubsysIdRef<P>> {
 		(self.id() == bridge_subsys_id::ID)
-			.then(|| bridge_subsys_id::BridgeSubsysIdRef(self.ptr.clone()))
+			.then(|| bridge_subsys_id::BridgeSubsysIdRef(unsafe { self.ptr.cast() }))
 	}
 
 	pub fn pcie(&self) -> Option<pcie::PcieRef<P>> {
-		(self.id() == pcie::ID).then(|| pcie::PcieRef(self.ptr.clone()))
+		(self.id() == pcie::ID).then(|| pcie::PcieRef(unsafe { self.ptr.cast() }))
 	}
 
 	pub fn msix(&self) -> Option<msix::MsixRef<P>> {
-		(self.id() == msix::ID).then(|| msix::MsixRef(self.ptr.clone()))
+		(self.id() == msix::ID).then(|| msix::MsixRef(unsafe { self.ptr.cast() }))
 	}
 
 	pub fn advanced_features(&self) -> Option<advanced_features::AdvancedFeaturesRef<P>> {
 		(self.id() == advanced_features::ID)
-			.then(|| advanced_features::AdvancedFeaturesRef(self.ptr.clone()))
+			.then(|| advanced_features::AdvancedFeaturesRef(unsafe { self.ptr.cast() }))
 	}
 
 	pub fn enhanced_alloc(&self) -> Option<enhanced_alloc::EnhancedAllocRef<P>> {
 		(self.id() == enhanced_alloc::ID).then(|| enhanced_alloc::EnhancedAllocRef {
-			ptr: self.ptr.clone(),
+			ptr: unsafe { self.ptr.cast() },
 			type1: self.type1,
 		})
 	}
 
 	pub fn fpb(&self) -> Option<fpb::FpbRef<P>> {
-		(self.id() == fpb::ID).then(|| fpb::FpbRef(self.ptr.clone()))
+		(self.id() == fpb::ID).then(|| fpb::FpbRef(unsafe { self.ptr.cast() }))
 	}
 }
 
@@ -168,12 +168,12 @@ pub mod vpd {
 		task::Poll,
 	};
 
-	use crate::{struct_offsets, Ptr, PtrExt};
+	use crate::{struct_offsets, Ptr, TPtr};
 
 	pub const ID: u8 = 3;
 
 	struct_offsets! {
-		struct Vpd {
+		pub(super) struct Vpd {
 			_common: [u8; 2],
 			address: u16,
 			data: u32,
@@ -182,25 +182,23 @@ pub mod vpd {
 
 	/// Reference to a vital product data capability structure.
 	#[derive(Clone, Copy, Debug)]
-	pub struct VpdRef<P: Ptr>(pub(super) P);
+	pub struct VpdRef<P: Ptr>(pub(super) TPtr<P, Vpd>);
 
 	// no idea if the compiler fences are worth it; my idea was that it should try to do as much
 	// work as possible in between the start_* and the poll_*
 	impl<P: Ptr> VpdRef<P> {
 		pub fn start_read(&self, address: u16) {
 			debug_assert!(address % 4 == 0 && address < 0x8000, "invalid VPD address");
-			unsafe {
-				self.0.offset(Vpd::address).write16_le(address & 0x7FFF);
-			}
+			self.0.offset(Vpd::address).write16_le(address & 0x7FFF);
 			compiler_fence(Acquire);
 		}
 
 		pub fn poll_read(&self) -> Poll<u32> {
 			compiler_fence(Release);
-			if unsafe { self.0.offset(Vpd::address).read16_le() } & 0x8000 == 0 {
+			if self.0.offset(Vpd::address).read16_le() & 0x8000 == 0 {
 				Poll::Pending
 			} else {
-				Poll::Ready(unsafe { self.0.offset(Vpd::data).read32_le() })
+				Poll::Ready(self.0.offset(Vpd::data).read32_le())
 			}
 		}
 
@@ -217,16 +215,14 @@ pub mod vpd {
 
 		pub fn start_write(&self, address: u16, val: u32) {
 			debug_assert!(address % 4 == 0 && address < 0x8000, "invalid VPD address");
-			unsafe {
-				self.0.offset(Vpd::data).write32_le(val);
-				self.0.offset(Vpd::address).write16_le(address | 0x8000);
-			}
+			self.0.offset(Vpd::data).write32_le(val);
+			self.0.offset(Vpd::address).write16_le(address | 0x8000);
 			compiler_fence(Acquire);
 		}
 
 		pub fn poll_write(&self) -> Poll<()> {
 			compiler_fence(Release);
-			if unsafe { self.0.offset(Vpd::address).read16_le() & 0x8000 == 0 } {
+			if self.0.offset(Vpd::address).read16_le() & 0x8000 == 0 {
 				Poll::Ready(())
 			} else {
 				Poll::Pending
@@ -244,12 +240,12 @@ pub mod vpd {
 
 /// Vendor-specific capability structure.
 pub mod vendor_specific {
-	use crate::{config::accessors, struct_offsets, Ptr, ReprPrimitive};
+	use crate::{accessors, struct_offsets, Ptr, TPtr};
 
 	pub const ID: u8 = 9;
 
 	struct_offsets! {
-		struct VendorSpecific {
+		pub(super) struct VendorSpecific {
 			_common: [u8; 2],
 			len: u8,
 		}
@@ -257,7 +253,7 @@ pub mod vendor_specific {
 
 	/// Reference to a vendor-specific capability structure.
 	#[derive(Clone, Copy, Debug)]
-	pub struct VendorSpecificRef<P: Ptr>(pub(super) P);
+	pub struct VendorSpecificRef<P: Ptr>(pub(super) TPtr<P, VendorSpecific>);
 
 	impl<P: Ptr> VendorSpecificRef<P> {
 		accessors! {
@@ -272,7 +268,7 @@ pub mod vendor_specific {
 		/// `offset` is the byte offset from the start of the capability
 		/// structure.
 		pub fn get(&self, offset: u8) -> Option<u8> {
-			(offset < self.len()).then(|| unsafe { self.0.offset(offset as i32).read8() })
+			(offset < self.len()).then(|| unsafe { self.0 .0.offset(offset as i32).read8() })
 		}
 
 		/// `offset` is the byte offset from the start of the capability
@@ -283,7 +279,7 @@ pub mod vendor_specific {
 		pub fn set(&self, offset: u8, val: u8) {
 			assert!(offset < self.len(), "index out of bounds");
 			unsafe {
-				self.0.offset(offset as i32).write8(val);
+				self.0 .0.offset(offset as i32).write8(val);
 			}
 		}
 
@@ -291,7 +287,7 @@ pub mod vendor_specific {
 		/// structure divided by 4. Returned value is little-endian.
 		pub fn get_u32(&self, offset: u8) -> Option<u32> {
 			(offset < self.len() >> 2)
-				.then(|| unsafe { self.0.offset((offset as i32) << 2).read32() })
+				.then(|| unsafe { self.0 .0.offset((offset as i32) << 2).read32() })
 		}
 
 		/// `offset` is the byte offset from the start of the capability
@@ -302,7 +298,7 @@ pub mod vendor_specific {
 		pub fn set_u32(&self, offset: u8, val: u32) {
 			assert!(offset < self.len() >> 2, "index out of bounds");
 			unsafe {
-				self.0.offset((offset as i32) << 2).write32(val);
+				self.0 .0.offset((offset as i32) << 2).write32(val);
 			}
 		}
 	}
@@ -310,12 +306,12 @@ pub mod vendor_specific {
 
 /// PCI bridge subsystem ID and subsystem vendor ID capability structure.
 pub mod bridge_subsys_id {
-	use crate::{config::accessors, struct_offsets, Ptr, ReprPrimitive};
+	use crate::{accessors, struct_offsets, Ptr, TPtr};
 
 	pub const ID: u8 = 0x0D;
 
 	struct_offsets! {
-		struct BridgeSubsysId {
+		pub(super) struct BridgeSubsysId {
 			_common: [u8; 2],
 			_reserved: [u8; 2],
 			vendor_id: u16,
@@ -326,7 +322,7 @@ pub mod bridge_subsys_id {
 	/// Reference to a subsystem ID and subsystem vendor ID capability
 	/// structure.
 	#[derive(Clone, Copy, Debug)]
-	pub struct BridgeSubsysIdRef<P: Ptr>(pub(super) P);
+	pub struct BridgeSubsysIdRef<P: Ptr>(pub(super) TPtr<P, BridgeSubsysId>);
 
 	impl<P: Ptr> BridgeSubsysIdRef<P> {
 		accessors! {
@@ -339,15 +335,12 @@ pub mod bridge_subsys_id {
 
 /// MSI-X capability structure.
 pub mod msix {
-	use crate::{
-		config::{accessors, bit_accessors, ReprPrimitive},
-		struct_offsets, Ptr, PtrExt,
-	};
+	use crate::{accessors, bit_accessors, struct_offsets, Ptr, ReprPrimitive, TPtr};
 
 	pub const ID: u8 = 0x11;
 
 	struct_offsets! {
-		struct Msix {
+		pub(super) struct Msix {
 			_common: [u8; 2],
 			message_control: MessageControl,
 			table_offset: u32,
@@ -357,7 +350,7 @@ pub mod msix {
 
 	/// Reference to an MSI-X capability structure.
 	#[derive(Clone, Copy, Debug)]
-	pub struct MsixRef<P: Ptr>(pub(super) P);
+	pub struct MsixRef<P: Ptr>(pub(super) TPtr<P, Msix>);
 
 	impl<P: Ptr> MsixRef<P> {
 		accessors! {
@@ -366,19 +359,19 @@ pub mod msix {
 		}
 
 		pub fn table_bar_idx(&self) -> u8 {
-			unsafe { self.0.offset(Msix::table_offset).read32_le() as u8 & 7 }
+			self.0.offset(Msix::table_offset).read32_le() as u8 & 7
 		}
 
 		pub fn table_offset(&self) -> u32 {
-			unsafe { self.0.offset(Msix::table_offset).read32_le() & 0xFFFF_FFF8 }
+			self.0.offset(Msix::table_offset).read32_le() & 0xFFFF_FFF8
 		}
 
 		pub fn pending_bit_array_bar_idx(&self) -> u8 {
-			unsafe { self.0.offset(Msix::pending_bit_array_offset).read32_le() as u8 & 7 }
+			self.0.offset(Msix::pending_bit_array_offset).read32_le() as u8 & 7
 		}
 
 		pub fn pending_bit_array_offset(&self) -> u32 {
-			unsafe { self.0.offset(Msix::pending_bit_array_offset).read32_le() & 0xFFFF_FFF8 }
+			self.0.offset(Msix::pending_bit_array_offset).read32_le() & 0xFFFF_FFF8
 		}
 	}
 
@@ -402,15 +395,12 @@ pub mod msix {
 
 /// PCI advanced features capability structure.
 pub mod advanced_features {
-	use crate::{
-		config::{accessors, bit_accessors, ReprPrimitive},
-		struct_offsets, Ptr,
-	};
+	use crate::{accessors, bit_accessors, struct_offsets, Ptr, ReprPrimitive, TPtr};
 
 	pub const ID: u8 = 0x13;
 
 	struct_offsets! {
-		struct AdvancedFeatures {
+		pub(super) struct AdvancedFeatures {
 			_common: [u8; 2],
 			_len: u8,
 			cpbs: AdvancedFeaturesCpbs,
@@ -421,7 +411,7 @@ pub mod advanced_features {
 
 	/// Reference to a PCI advanced features capability structure.
 	#[derive(Clone, Copy, Debug)]
-	pub struct AdvancedFeaturesRef<P: Ptr>(pub(super) P);
+	pub struct AdvancedFeaturesRef<P: Ptr>(pub(super) TPtr<P, AdvancedFeatures>);
 
 	impl<P: Ptr> AdvancedFeaturesRef<P> {
 		accessors! {

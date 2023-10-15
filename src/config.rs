@@ -9,141 +9,12 @@ use core::{
 	ops::BitAnd,
 };
 
-use crate::{struct_offsets, Ptr, PtrExt, ReprPrimitive};
+use crate::{accessors, bit_accessors, struct_offsets, Ptr, ReprPrimitive, TPtr};
 use cpb::CpbIter;
 
-macro_rules! accessors {
-	{
-		use $strct:ident;
-		$($(#[$attr:meta])* $name:ident: $ty:ty { get $(=> $map_get:expr)?; $(set $set_name:ident $(=> $map_set:expr)?;)? })+
-	} => {
-		$(accessors!(@single $(#[$attr])* $strct::$name: $ty, { get $(=> $map_get)?; $(set $set_name $(=> $map_set)?;)? });)+
-	};
-	(@single $(#[$attr:meta])* $strct:ident::$name:ident: $ty:ty, { get $(=> $map_get:expr)?; $(set $set_name:ident $(=> $map_set:expr)?;)? }) => {
-		accessors!(@get $(#[$attr])* $strct::$name: $ty, $($map_get)?);
-		accessors!(@set $(#[$attr])* $strct::$name: $ty, $($set_name, $($map_set)?)?);
-	};
-	(@get $(#[$attr:meta])* $strct:ident::$name:ident: $ty:ty,) => {
-		$(#[$attr])*
-		#[inline]
-		pub fn $name(&self) -> $ty {
-			unsafe { core::mem::transmute(<<$ty as ReprPrimitive>::Repr as crate::Primitive>::read_from(self.0.offset($strct::$name))) }
-		}
-	};
-	(@get $(#[$attr:meta])* $strct:ident::$name:ident: $ty:ty, $map_get:expr) => {
-		$(#[$attr])*
-		#[inline]
-		pub fn $name(&self) -> $ty {
-			$map_get(unsafe { core::mem::transmute(<<$ty as ReprPrimitive>::Repr as crate::Primitive>::read_from(self.0.offset($strct::$name))) })
-		}
-	};
-	(@set $(#[$attr:meta])* $strct:ident::$name:ident: $ty:ty,) => {};
-	(@set $(#[$attr:meta])* $strct:ident::$name:ident: $ty:ty, $set_name:ident, $($map_set:expr)?) => {
-		$(#[$attr])*
-		#[inline]
-		pub fn $set_name(&self, val: $ty) {
-			$(let val = $map_set(val);)?
-			unsafe {
-				crate::Primitive::write_to(core::mem::transmute::<$ty, <$ty as ReprPrimitive>::Repr>(val), self.0.offset($strct::$name));
-			}
-		}
-	};
-}
-
-macro_rules! bit_accessors {
-	($($(#[$attr:meta])* $name:ident: $($ty:ty,)? $start:literal $(..$end:literal $($mask:ident)?)? { get $(=> $map_get:expr)?; $($set_kw:ident $set_name:ident $(=> $map_set:expr)?;)? })+) => {
-		$(bit_accessors!(@single $(#[$attr])* $name: $($ty,)? $start $(..$end $($mask)?)? { get $(=> $map_get)?; $($set_kw $set_name $(=> $map_set)?;)? });)+
-	};
-	(@single $(#[$attr:meta])* $name:ident: $($ty:ty,)? $start:literal $(..$end:literal $($mask:ident)?)? { get $(=> $map_get:expr)?; $($set_kw:ident $set_name:ident $(=> $map_set:expr)?;)? }) => {
-		bit_accessors!(@get $(#[$attr])* $name: $($ty,)? $start $(..$end $($mask)?)?, $($map_get)?);
-		bit_accessors!(@set $(#[$attr])* $name: $($ty,)? $start $(..$end $($mask)?)?, $($set_kw $set_name, $($map_set)?)?);
-	};
-	(@get $(#[$attr:meta])* $name:ident: $pos:literal,) => {
-		$(#[$attr])*
-		#[inline]
-		pub fn $name(self) -> bool {
-			<Self as ReprPrimitive>::Repr::from_le(self.0) & (1 << $pos) != 0
-		}
-	};
-	(@get $(#[$attr:meta])* $name:ident: $ty:ty, $start:literal..$end:literal,) => {
-		$(#[$attr])*
-		#[inline]
-		pub fn $name(self) -> $ty {
-			crate::BitManip::bit_range(<Self as ReprPrimitive>::Repr::from_le(self.0), $start..$end) as _
-		}
-	};
-	(@get $(#[$attr:meta])* $name:ident: $ty:ty, $start:literal..$end:literal, $map_get:expr) => {
-		$(#[$attr])*
-		#[inline]
-		pub fn $name(self) -> $ty {
-			$map_get(crate::BitManip::bit_range(<Self as ReprPrimitive>::Repr::from_le(self.0), $start..$end))
-		}
-	};
-	(@get $(#[$attr:meta])* $name:ident: $ty:ty, $start:literal..$end:literal mask,) => {
-		$(#[$attr])*
-		#[inline]
-		pub fn $name(self) -> $ty {
-			let mask: <Self as ReprPrimitive>::Repr = crate::BitManip::new_bit_mask($start..$end);
-			(<Self as ReprPrimitive>::Repr::from_le(self.0) & mask) as _
-		}
-	};
-	(@set $(#[$attr:meta])* $name:ident: $($ty:ty,)? $start:literal $(..$end:literal)?,) => {};
-	(@set $(#[$attr:meta])* $name:ident: $pos:literal, set $set_name:ident,) => {
-		$(#[$attr])*
-		#[inline]
-		#[must_use]
-		pub fn $set_name(self, val: bool) -> Self {
-			Self(
-				(self.0 & !((1 as <Self as ReprPrimitive>::Repr) << $pos).to_le())
-					| ((val as <Self as ReprPrimitive>::Repr) << $pos).to_le()
-			)
-		}
-	};
-	(@set $(#[$attr:meta])* $name:ident: $ty:ty, $start:literal..$end:literal, set $set_name:ident,) => {
-		$(#[$attr])*
-		#[inline]
-		#[must_use]
-		pub fn $set_name(self, val: $ty) -> Self {
-			debug_assert!((val as u128) < (1_u128 << ($end - $start)), "invalid {}", stringify!($name));
-			let mask: <Self as ReprPrimitive>::Repr = crate::BitManip::new_bit_mask($start..$end);
-			Self((self.0 & mask.to_le()) | ((val as <Self as ReprPrimitive>::Repr) << $start).to_le())
-		}
-	};
-	(@set $(#[$attr:meta])* $name:ident: $ty:ty, $start:literal..$end:literal, set $set_name:ident, $map_get:expr) => {
-		$(#[$attr])*
-		#[inline]
-		#[must_use]
-		pub fn $set_name(self, val: $ty) -> Self {
-			let mask: <Self as ReprPrimitive>::Repr = crate::BitManip::new_bit_mask($start..$end);
-			Self((self.0 & mask.to_le()) | ($map_get(val) << $start).to_le())
-		}
-	};
-	(@set $(#[$attr:meta])* $name:ident: $ty:ty, $start:literal..$end:literal mask, set $set_name:ident,) => {
-		$(#[$attr])*
-		#[inline]
-		#[must_use]
-		pub fn $set_name(self, val: $ty) -> Self {
-			let mask: <Self as ReprPrimitive>::Repr = crate::BitManip::new_bit_mask($start..$end);
-			debug_assert_eq!(val & mask, val, "invalid {}", stringify!($name));
-			Self((self.0 & !mask.to_le()) | (val & mask).to_le())
-		}
-	};
-	(@set $(#[$attr:meta])* $name:ident: $pos:literal, set1 $set_name:ident,) => {
-		$(#[$attr])*
-		#[inline]
-		#[must_use]
-		pub fn $set_name(self) -> Self {
-			Self(self.0 | ((1 as <Self as ReprPrimitive>::Repr) << $pos).to_le())
-		}
-	};
-}
-
-pub(crate) use {accessors, bit_accessors};
-
 struct_offsets! {
-	struct Header {
-		vendor_id: u16,
-		device_id: u16,
+	pub(crate) struct Header {
+		device_id: DeviceId,
 		command: Command,
 		status: Status,
 		class_code: ClassCode,
@@ -157,19 +28,24 @@ struct_offsets! {
 
 /// Reference to a PCI configuration space.
 #[derive(Clone, Copy)]
-pub struct HeaderRef<P: Ptr>(P);
+pub struct HeaderRef<P: Ptr>(TPtr<P, Header>);
 
 impl<P: Ptr> HeaderRef<P> {
 	pub unsafe fn new(ptr: P) -> Self {
-		Self(ptr)
+		Self(TPtr::new(ptr))
+	}
+
+	pub fn to_ptr(&self) -> P {
+		self.0 .0.clone()
 	}
 
 	accessors! {
 		use Header;
-		vendor_id: u16 { get => u16::from_le; }
-		device_id: u16 { get => u16::from_le; }
+		/// Vendor/device ID value.
+		device_id: DeviceId { get; }
 		command: Command { get; set set_command; }
 		status: Status { get; set set_status; }
+		/// Class code value, including revision ID.
 		class_code: ClassCode { get; }
 		cache_line_size: u8 { get; set set_cache_line_size; }
 		latency_timer: u8 { get; set set_latency_timer; }
@@ -180,9 +56,17 @@ impl<P: Ptr> HeaderRef<P> {
 	#[inline]
 	pub fn specific(&self) -> SpecificHeaderRef<P> {
 		match self.header_type().get() {
-			0 => SpecificHeaderRef::Type0(T0HeaderRef(self.0.clone())),
-			1 => SpecificHeaderRef::Type1(T1HeaderRef(self.0.clone())),
+			0 => SpecificHeaderRef::Type0(T0HeaderRef(unsafe { self.0.cast() })),
+			1 => SpecificHeaderRef::Type1(T1HeaderRef(unsafe { self.0.cast() })),
 			_ => panic!("reserved value"),
+		}
+	}
+
+	#[inline]
+	pub fn bars(&self) -> BarIter<P> {
+		match self.specific() {
+			SpecificHeaderRef::Type0(h) => h.bars(),
+			SpecificHeaderRef::Type1(h) => h.bars(),
 		}
 	}
 }
@@ -190,7 +74,6 @@ impl<P: Ptr> HeaderRef<P> {
 impl<P: Ptr> Debug for HeaderRef<P> {
 	fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
 		f.debug_struct("HeaderRef")
-			.field("vendor_id", &self.vendor_id())
 			.field("device_id", &self.device_id())
 			.field("command", &self.command())
 			.field("status", &self.status())
@@ -202,6 +85,35 @@ impl<P: Ptr> Debug for HeaderRef<P> {
 			.field("builtin_self_test", &self.builtin_self_test())
 			.finish()
 	}
+}
+
+/// Vendor/device ID value of a PCI configuration space.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(C)]
+pub struct DeviceId {
+	vendor: u16,
+	device: u16,
+}
+
+impl DeviceId {
+	pub const fn new(vendor: u16, device: u16) -> Self {
+		Self {
+			vendor: vendor.to_le(),
+			device: device.to_le(),
+		}
+	}
+
+	pub const fn vendor(self) -> u16 {
+		u16::from_le(self.vendor)
+	}
+
+	pub const fn device(self) -> u16 {
+		u16::from_le(self.device)
+	}
+}
+
+unsafe impl ReprPrimitive for DeviceId {
+	type Repr = u32;
 }
 
 /// Command value of a PCI configuration space.
@@ -265,7 +177,7 @@ impl BitAnd for Status {
 	}
 }
 
-/// Class code value of a PCI configuration space.
+/// Class code value of a PCI configuration space, including revision ID.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(C)]
 pub struct ClassCode {
@@ -362,11 +274,15 @@ struct_offsets! {
 
 /// Reference to a PCI configuration space with type 0 header.
 #[derive(Clone, Copy)]
-pub struct T0HeaderRef<P: Ptr>(P);
+pub struct T0HeaderRef<P: Ptr>(TPtr<P, T0Header>);
 
 impl<P: Ptr> T0HeaderRef<P> {
+	pub fn to_ptr(&self) -> P {
+		self.0 .0.clone()
+	}
+
 	pub fn common(&self) -> HeaderRef<P> {
-		HeaderRef(self.0.clone())
+		HeaderRef(unsafe { self.0.cast() })
 	}
 
 	accessors! {
@@ -385,7 +301,7 @@ impl<P: Ptr> T0HeaderRef<P> {
 	///
 	/// Do not call this while another `BarIter` or [`Bar`] still exists.
 	pub fn bars(&self) -> BarIter<P> {
-		unsafe { BarIter::new(self.0.offset(T0Header::base_addrs), 6) }
+		unsafe { BarIter::new(self.0.offset(T0Header::base_addrs)) }
 	}
 
 	pub fn probe_expansion_rom_size(&self) -> u32 {
@@ -394,7 +310,7 @@ impl<P: Ptr> T0HeaderRef<P> {
 	}
 
 	pub fn cpbs(&self) -> CpbIter<P> {
-		let offset = unsafe { self.0.offset(T0Header::cpbs_ptr).read8() };
+		let offset = self.0.offset(T0Header::cpbs_ptr).read();
 		CpbIter::new(self.common(), offset)
 	}
 }
@@ -446,11 +362,15 @@ struct_offsets! {
 
 /// Reference to a PCI configuration space with type 1 header.
 #[derive(Clone, Copy)]
-pub struct T1HeaderRef<P: Ptr>(P);
+pub struct T1HeaderRef<P: Ptr>(TPtr<P, T1Header>);
 
 impl<P: Ptr> T1HeaderRef<P> {
+	pub fn to_ptr(&self) -> P {
+		self.0 .0.clone()
+	}
+
 	pub fn common(&self) -> HeaderRef<P> {
-		HeaderRef(self.0.clone())
+		HeaderRef(unsafe { self.0.cast() })
 	}
 
 	accessors! {
@@ -478,40 +398,36 @@ impl<P: Ptr> T1HeaderRef<P> {
 	///
 	/// Do not call this while another `BarIter` or [`Bar`] still exists.
 	pub fn bars(&self) -> BarIter<P> {
-		unsafe { BarIter::new(self.0.offset(T1Header::base_addrs), 2) }
+		unsafe { BarIter::new(self.0.offset(T1Header::base_addrs)) }
 	}
 
 	pub fn mem_base(&self) -> u32 {
-		(unsafe { self.0.offset(T1Header::mem_base).read16_le() } as u32 & 0xFFF0) << 0x10
+		(self.0.offset(T1Header::mem_base).read16_le() as u32 & 0xFFF0) << 0x10
 	}
 
 	pub fn set_mem_base(&self, val: u32) {
 		debug_assert_eq!(val % 0x10_0000, 0, "invalid memory base");
-		unsafe {
-			self.0
-				.offset(T1Header::mem_base)
-				.write16_le((val >> 0x10) as u16);
-		}
+		self.0
+			.offset(T1Header::mem_base)
+			.write16_le((val >> 0x10) as u16);
 	}
 
 	/// The actual limit is `0x10_0000` higher than this.
 	pub fn mem_limit(&self) -> u32 {
-		(unsafe { self.0.offset(T1Header::mem_limit).read16_le() } as u32 & 0xFFF0) << 0x10
+		(self.0.offset(T1Header::mem_limit).read16_le() as u32 & 0xFFF0) << 0x10
 	}
 
 	/// The input should be the actual limit minus `0x10_0000`.
 	pub fn set_mem_limit(&self, val: u32) {
 		debug_assert_eq!(val % 0x10_0000, 0, "invalid memory limit");
-		unsafe {
-			self.0
-				.offset(T1Header::mem_limit)
-				.write16_le((val >> 0x10) as u16);
-		}
+		self.0
+			.offset(T1Header::mem_limit)
+			.write16_le((val >> 0x10) as u16);
 	}
 
 	/// Iterates over PCI capabilities.
 	pub fn cpbs(&self) -> CpbIter<P> {
-		let offset = unsafe { self.0.offset(T1Header::cpbs_ptr).read8() };
+		let offset = self.0.offset(T1Header::cpbs_ptr).read();
 		CpbIter::new(self.common(), offset)
 	}
 
@@ -619,17 +535,19 @@ unsafe impl ReprPrimitive for BridgeControl {
 /// Mutably iterates over base address registers.
 #[derive(Clone)]
 pub struct BarIter<P: Ptr> {
-	start: P,
-	end: P,
+	start: TPtr<P, [u32; 0]>,
+	end: TPtr<P, [u32; 0]>,
 }
 
 impl<P: Ptr> BarIter<P> {
 	/// # Safety
 	/// The input has to point to a valid array.
-	unsafe fn new(ptr: P, len: i32) -> Self {
+	#[inline]
+	unsafe fn new<const N: usize>(ptr: TPtr<P, [u32; N]>) -> Self {
+		let start = ptr.cast::<[u32; 0]>();
 		Self {
-			end: ptr.offset(len << 2),
-			start: ptr,
+			end: start.raw_offset((N as i32) << 2),
+			start,
 		}
 	}
 }
@@ -641,9 +559,10 @@ impl<P: Ptr> Iterator for BarIter<P> {
 		if self.start == self.end {
 			return None;
 		}
-		let next_ptr = unsafe { self.start.offset(4) };
+		let next_ptr = unsafe { self.start.raw_offset(4) };
 		let ptr = replace(&mut self.start, next_ptr);
-		let lo_le = unsafe { ptr.read32() };
+		let ptr = unsafe { ptr.cast::<u32>() };
+		let lo_le = ptr.read();
 		let lo = u32::from_le(lo_le);
 		if lo & 1 != 0 {
 			return Some(Bar::IoSpace(IoBarRef(ptr), lo));
@@ -652,9 +571,12 @@ impl<P: Ptr> Iterator for BarIter<P> {
 			0 => Bar::MemSpace32(Mem32BarRef(ptr), Mem32BaseAddr(lo_le)),
 			4 => {
 				assert_ne!(self.start, self.end, "invalid 64-bit BAR");
-				let hi = unsafe { self.start.read32() };
-				self.start = unsafe { ptr.offset(4) };
-				Bar::MemSpace64(Mem64BarRef(ptr), Mem64BaseAddr::new(lo_le, hi))
+				let hi = unsafe { self.start.cast::<u32>() }.read();
+				self.start = unsafe { self.start.raw_offset(4) };
+				Bar::MemSpace64(
+					Mem64BarRef(unsafe { ptr.cast() }),
+					Mem64BaseAddr([lo_le, hi]),
+				)
 			}
 			_ => panic!("reserved value"),
 		};
@@ -671,8 +593,8 @@ impl<P: Ptr> Debug for BarIter<P> {
 }
 
 /// Base address register.
-#[non_exhaustive]
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub enum Bar<P: Ptr> {
 	MemSpace32(Mem32BarRef<P>, Mem32BaseAddr),
 	MemSpace64(Mem64BarRef<P>, Mem64BaseAddr),
@@ -681,17 +603,15 @@ pub enum Bar<P: Ptr> {
 
 /// Reference to base address register containing a 32-bit memory address.
 #[derive(Clone, Copy, Debug)]
-pub struct Mem32BarRef<P: Ptr>(P);
+pub struct Mem32BarRef<P: Ptr>(TPtr<P, u32>);
 
 impl<P: Ptr> Mem32BarRef<P> {
 	pub fn read(&self) -> Mem32BaseAddr {
-		unsafe { Mem32BaseAddr(self.0.read32()) }
+		Mem32BaseAddr(self.0.read())
 	}
 
 	pub fn write(&self, val: Mem32BaseAddr) {
-		unsafe {
-			self.0.write32(val.0);
-		}
+		self.0.write(val.0);
 	}
 
 	pub fn probe_size(&self) -> u32 {
@@ -718,21 +638,18 @@ unsafe impl ReprPrimitive for Mem32BaseAddr {
 
 /// Reference to base address register containing a 64-bit memory address.
 #[derive(Clone, Copy, Debug)]
-pub struct Mem64BarRef<P: Ptr>(P);
+pub struct Mem64BarRef<P: Ptr>(TPtr<P, [u32; 2]>);
 
 impl<P: Ptr> Mem64BarRef<P> {
 	#[inline]
 	pub fn read(&self) -> Mem64BaseAddr {
-		unsafe { Mem64BaseAddr::new(self.0.read32(), self.0.offset(4).read32()) }
+		Mem64BaseAddr([self.0.index(0).read(), self.0.index(1).read()])
 	}
 
 	#[inline]
 	pub fn write(&self, val: Mem64BaseAddr) {
-		let [a, b, c, d, e, f, g, h] = val.0.to_ne_bytes();
-		unsafe {
-			self.0.write32(u32::from_ne_bytes([a, b, c, d]));
-			self.0.offset(4).write32(u32::from_ne_bytes([e, f, g, h]));
-		}
+		self.0.index(0).write(val.0[0]);
+		self.0.index(1).write(val.0[1]);
 	}
 
 	pub fn probe_size(&self) -> u64 {
@@ -744,42 +661,45 @@ impl<P: Ptr> Mem64BarRef<P> {
 /// Value of a base address register containing a 64-bit memory address.
 #[derive(Clone, Copy, Debug)]
 #[repr(transparent)]
-pub struct Mem64BaseAddr(u64);
+pub struct Mem64BaseAddr([u32; 2]);
 
 impl Mem64BaseAddr {
+	pub fn prefetchable(self) -> bool {
+		u32::from_le(self.0[0]) & 8 != 0
+	}
+
 	#[inline]
-	fn new(lo: u32, hi: u32) -> Self {
-		let [a, b, c, d] = lo.to_ne_bytes();
-		let [e, f, g, h] = hi.to_ne_bytes();
-		Self(u64::from_ne_bytes([a, b, c, d, e, f, g, h]))
+	pub fn addr(self) -> u64 {
+		let [a, b, c, d] = self.0[0].to_ne_bytes();
+		let [e, f, g, h] = self.0[1].to_ne_bytes();
+		u64::from_le_bytes([a, b, c, d, e, f, g, h]) & 0xFFFF_FFFF_FFFF_FFF0
 	}
 
-	bit_accessors! {
-		prefetchable: 3 { get; }
-		addr: u64, 4..0x40 mask { get; set with_addr; }
+	#[inline]
+	#[must_use]
+	pub fn with_addr(self, val: u64) -> Self {
+		debug_assert_eq!(val & 3, 0, "invalid addr");
+		let [a, b, c, d, e, f, g, h] = (val & 0xFFFF_FFFF_FFFF_FFF0).to_le_bytes();
+		Self([
+			u32::from_ne_bytes([a, b, c, d]),
+			u32::from_ne_bytes([e, f, g, h]),
+		])
 	}
-}
-
-unsafe impl ReprPrimitive for Mem64BaseAddr {
-	type Repr = u64;
 }
 
 /// Reference to a base address register containing a 32-bit I/O address.
 #[derive(Clone, Copy, Debug)]
-pub struct IoBarRef<P: Ptr>(P);
+pub struct IoBarRef<P: Ptr>(TPtr<P, u32>);
 
 impl<P: Ptr> IoBarRef<P> {
-	#[inline]
 	pub fn read(&self) -> u32 {
-		unsafe { self.0.read32_le() & 0xFFFF_FFFC }
+		self.0.read32_le() & 0xFFFF_FFFC
 	}
 
 	#[inline]
 	pub fn write(&self, val: u32) {
 		debug_assert_eq!(val % 4, 0, "invalid addr");
-		unsafe {
-			self.0.write32_le((val & 0xFFFF_FFFC) | 1);
-		}
+		self.0.write32_le((val & 0xFFFF_FFFC) | 1);
 	}
 
 	#[inline]

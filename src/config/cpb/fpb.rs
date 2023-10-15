@@ -2,15 +2,12 @@
 
 use num_enum::TryFromPrimitive;
 
-use crate::{
-	config::{accessors, bit_accessors, ReprPrimitive},
-	struct_offsets, Ptr, PtrExt,
-};
+use crate::{accessors, bit_accessors, struct_offsets, Ptr, ReprPrimitive, TPtr};
 
 pub const ID: u8 = 0x15;
 
 struct_offsets! {
-	struct Fpb {
+	pub(super) struct Fpb {
 		_common: [u8; 2],
 		_reserved: [u8; 2],
 		cpbs: FpbCpbs,
@@ -26,7 +23,7 @@ struct_offsets! {
 
 /// Reference to a flattening portal bridge capability structure.
 #[derive(Clone, Copy, Debug)]
-pub struct FpbRef<P: Ptr>(pub(super) P);
+pub struct FpbRef<P: Ptr>(pub(super) TPtr<P, Fpb>);
 
 impl<P: Ptr> FpbRef<P> {
 	accessors! {
@@ -40,7 +37,7 @@ impl<P: Ptr> FpbRef<P> {
 
 	pub fn mem_hi_vector_start_addr(&self) -> u64 {
 		let lo = u32::from_le(self.mem_hi_vector_control().0) & 0xF000_0000;
-		let hi = unsafe { self.0.offset(Fpb::mem_hi_vector_start_addr_hi).read32_le() };
+		let hi = self.0.offset(Fpb::mem_hi_vector_start_addr_hi).read32_le();
 		((hi as u64) << 0x20) | lo as u64
 	}
 
@@ -50,39 +47,31 @@ impl<P: Ptr> FpbRef<P> {
 			(self.mem_hi_vector_control().0 & 0x0FFF_FFFF_u32.to_le())
 				| (val as u32 & 0xF000_0000).to_le(),
 		));
-		unsafe {
-			self.0
-				.offset(Fpb::mem_hi_vector_start_addr_hi)
-				.write32_le((val >> 0x20) as u32);
-		}
+		self.0
+			.offset(Fpb::mem_hi_vector_start_addr_hi)
+			.write32_le((val >> 0x20) as u32);
 	}
 
 	pub fn vector_read(&self, select: VectorSelect, offset: u8) -> u32 {
 		self.set_vector_access_control(select, offset);
-		unsafe { self.0.offset(Fpb::vector_access_data).read32_le() }
+		self.0.offset(Fpb::vector_access_data).read32_le()
 	}
 
 	pub fn vector_write(&self, select: VectorSelect, offset: u8, val: u32) {
 		self.set_vector_access_control(select, offset);
-		unsafe {
-			self.0.offset(Fpb::vector_access_data).write32_le(val);
-		}
+		self.0.offset(Fpb::vector_access_data).write32_le(val);
 	}
 
 	pub fn vector_replace(&self, select: VectorSelect, offset: u8, val: u32) -> u32 {
 		self.set_vector_access_control(select, offset);
-		unsafe {
-			let ret = self.0.offset(Fpb::vector_access_data).read32_le();
-			self.0.offset(Fpb::vector_access_data).write32_le(val);
-			ret
-		}
+		let ret = self.0.offset(Fpb::vector_access_data).read32_le();
+		self.0.offset(Fpb::vector_access_data).write32_le(val);
+		ret
 	}
 
 	fn set_vector_access_control(&self, select: VectorSelect, offset: u8) {
 		let val = ((select as u32) << 0x0E) | offset as u32;
-		unsafe {
-			self.0.offset(Fpb::vector_access_control).write32_le(val);
-		}
+		self.0.offset(Fpb::vector_access_control).write32_le(val);
 	}
 }
 

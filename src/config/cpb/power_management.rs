@@ -1,14 +1,11 @@
 //! PCI power management capability structure.
 
-use crate::{
-	config::{accessors, bit_accessors, ReprPrimitive},
-	struct_offsets, Ptr,
-};
+use crate::{accessors, bit_accessors, struct_offsets, Ptr, ReprPrimitive, TPtr};
 
 pub const ID: u8 = 1;
 
 struct_offsets! {
-	struct PowerManagement {
+	pub(super) struct PowerManagement {
 		_common: [u8; 2],
 		cpbs: PowerManagementCpbs,
 		control_status: ControlStatus,
@@ -19,7 +16,7 @@ struct_offsets! {
 
 /// Reference to a PCI power management capability structure.
 #[derive(Clone, Copy, Debug)]
-pub struct PowerManagementRef<P: Ptr>(pub(super) P);
+pub struct PowerManagementRef<P: Ptr>(pub(super) TPtr<P, PowerManagement>);
 
 impl<P: Ptr> PowerManagementRef<P> {
 	accessors! {
@@ -54,7 +51,7 @@ impl<P: Ptr> PowerManagementRef<P> {
 		);
 		self.control_status()
 			.data_scale()
-			.map(|s| s as u16 * unsafe { self.0.offset(PowerManagement::data).read8() } as u16)
+			.map(|s| s as u16 * self.0.offset(PowerManagement::data).read() as u16)
 	}
 }
 

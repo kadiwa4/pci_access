@@ -3,20 +3,16 @@
 use core::{
 	fmt::{self, Debug, Formatter},
 	iter::FusedIterator,
-	mem::replace,
 };
 
 use num_enum::TryFromPrimitive;
 
-use crate::{
-	config::{accessors, bit_accessors, ReprPrimitive},
-	struct_offsets, Ptr, PtrExt,
-};
+use crate::{accessors, bit_accessors, struct_offsets, Ptr, ReprPrimitive, TPtr};
 
 pub const ID: u8 = 0x14;
 
 struct_offsets! {
-	struct Part0 {
+	pub(super) struct Part0 {
 		_common: [u8; 2],
 		entry_count: u8,
 		_reserved: u8,
@@ -33,15 +29,15 @@ struct_offsets! {
 
 struct_offsets! {
 	struct EnhancedAllocT0 {
-		_part0: [u8; 4],
+		_part0: Part0,
 		array: [Entry; 0],
 	}
 }
 
 struct_offsets! {
 	struct EnhancedAllocT1 {
-		_part0: [u8; 4],
-		part1: [u8; 4],
+		_part0: Part0,
+		part1: Part1,
 		array: [Entry; 0],
 	}
 }
@@ -49,41 +45,40 @@ struct_offsets! {
 /// Reference to an enhanced allocation capability structure.
 #[derive(Clone, Copy, Debug)]
 pub struct EnhancedAllocRef<P: Ptr> {
-	pub(super) ptr: P,
+	pub(super) ptr: TPtr<P, Part0>,
 	pub(super) type1: bool,
 }
 
 impl<P: Ptr> EnhancedAllocRef<P> {
 	#[inline]
-	fn part1(&self) -> Option<P> {
+	fn part1(&self) -> Option<TPtr<P, Part1>> {
 		self.type1
-			.then(|| unsafe { self.ptr.offset(EnhancedAllocT1::part1) })
+			.then(|| unsafe { self.ptr.cast() }.offset(EnhancedAllocT1::part1))
 	}
 
 	/// Returns `None` if the configuration space header is of type 0.
 	#[inline]
 	pub fn secondary_bus_num(&self) -> Option<u8> {
 		self.part1()
-			.map(|p| unsafe { p.offset(Part1::secondary_bus_num).read8() })
+			.map(|p| p.offset(Part1::secondary_bus_num).read())
 	}
 
 	/// Returns `None` if the configuration space header is of type 0.
 	#[inline]
 	pub fn subordinate_bus_num(&self) -> Option<u8> {
 		self.part1()
-			.map(|p| unsafe { p.offset(Part1::subordinate_bus_num).read8() })
+			.map(|p| p.offset(Part1::subordinate_bus_num).read())
 	}
 
 	pub fn entries(&self) -> EntriesIter<P> {
-		let offset = if self.type1 {
-			EnhancedAllocT1::array
+		let ptr = if self.type1 {
+			unsafe { self.ptr.cast() }.offset(EnhancedAllocT1::array)
 		} else {
-			EnhancedAllocT0::array
+			unsafe { self.ptr.cast() }.offset(EnhancedAllocT0::array)
 		};
-		let ptr = unsafe { self.ptr.offset(offset) };
 		EntriesIter {
 			current: ptr,
-			remaining_len: unsafe { self.ptr.offset(Part0::entry_count).read8() } as usize & 0x3F,
+			remaining_len: self.ptr.offset(Part0::entry_count).read() & 0x3F,
 		}
 	}
 }
@@ -91,8 +86,8 @@ impl<P: Ptr> EnhancedAllocRef<P> {
 /// Mutably iterates over enhanced allocation [entries](EntryRef).
 #[derive(Clone)]
 pub struct EntriesIter<P: Ptr> {
-	current: P,
-	remaining_len: usize,
+	current: TPtr<P, [Entry; 0]>,
+	remaining_len: u8,
 }
 
 impl<P: Ptr> Iterator for EntriesIter<P> {
@@ -103,12 +98,21 @@ impl<P: Ptr> Iterator for EntriesIter<P> {
 			return None;
 		}
 		self.remaining_len -= 1;
-		let offset = 1 + (unsafe { self.current.offset(Entry::header).read32() } & 7) as i32;
-		let next_ptr = unsafe { self.current.offset(offset << 2) };
-		Some(EntryRef(replace(&mut self.current, next_ptr)))
+		let current = unsafe { self.current.cast::<Entry>() };
+		let offset = 1 + (current.offset(Entry::header).read() & 7) as i32;
+		self.current = unsafe { self.current.raw_offset(offset << 2) };
+		Some(EntryRef(current))
+	}
+
+	fn size_hint(&self) -> (usize, Option<usize>) {
+		(
+			self.remaining_len as usize,
+			Some(self.remaining_len as usize),
+		)
 	}
 }
 
+impl<P: Ptr> ExactSizeIterator for EntriesIter<P> {}
 impl<P: Ptr> FusedIterator for EntriesIter<P> {}
 
 impl<P: Ptr> Debug for EntriesIter<P> {
@@ -129,7 +133,7 @@ struct_offsets! {
 
 /// Entry in an [enhanced allocation capability structure](EnhancedAllocRef).
 #[derive(Clone, Copy, Debug)]
-pub struct EntryRef<P: Ptr>(P);
+pub struct EntryRef<P: Ptr>(TPtr<P, Entry>);
 
 impl<P: Ptr> EntryRef<P> {
 	accessors! {
@@ -138,60 +142,50 @@ impl<P: Ptr> EntryRef<P> {
 	}
 
 	pub fn start_addr(&self) -> u64 {
-		unsafe {
-			let mut ret = self.0.offset(Entry::start_lo).read32_le() as u64;
-			if ret & 2 != 0 {
-				ret |= (self.0.offset(Entry::hi0).read32_le() as u64) << 0x20;
-			}
-			ret & 0xFFFF_FFFF_FFFF_FFFC
+		let mut ret = self.0.offset(Entry::start_lo).read32_le() as u64;
+		if ret & 2 != 0 {
+			ret |= (self.0.offset(Entry::hi0).read32_le() as u64) << 0x20;
 		}
+		ret & 0xFFFF_FFFF_FFFF_FFFC
 	}
 
 	pub fn set_start_addr(&self, val: u64) {
 		debug_assert_eq!(val % 4, 0, "invalid start_addr");
-		unsafe {
-			let use_hi = self.0.offset(Entry::start_lo).read32_le() & 2 != 0;
-			self.0.offset(Entry::start_lo).write32_le(val as u32);
-			if use_hi {
-				self.0.offset(Entry::hi0).write32_le((val >> 0x20) as u32);
-			} else {
-				debug_assert!(u32::try_from(val).is_ok(), "invalid start_addr");
-			}
+		let use_hi = self.0.offset(Entry::start_lo).read32_le() & 2 != 0;
+		self.0.offset(Entry::start_lo).write32_le(val as u32);
+		if use_hi {
+			self.0.offset(Entry::hi0).write32_le((val >> 0x20) as u32);
+		} else {
+			debug_assert!(u32::try_from(val).is_ok(), "invalid start_addr");
 		}
 	}
 	/// The actual end address is `4` higher than this.
 	pub fn end_addr(&self) -> u64 {
-		unsafe {
-			let mut ret = self.0.offset(Entry::end_lo).read32_le() as u64;
-			if ret & 2 != 0 {
-				ret |= (self.end_hi_ptr().read32_le() as u64) << 0x20;
-			}
-			ret & 0xFFFF_FFFF_FFFF_FFFC
+		let mut ret = self.0.offset(Entry::end_lo).read32_le() as u64;
+		if ret & 2 != 0 {
+			ret |= (self.end_hi_ptr().read32_le() as u64) << 0x20;
 		}
+		ret & 0xFFFF_FFFF_FFFF_FFFC
 	}
 
 	/// The input should be the actual end address minus `4`.
 	pub fn set_end_addr(&self, val: u64) {
 		debug_assert_eq!(val % 4, 0, "invalid end_addr");
-		unsafe {
-			let use_hi = self.0.offset(Entry::end_lo).read32_le() & 2 != 0;
-			self.0.offset(Entry::end_lo).write32_le(val as u32);
-			if use_hi {
-				self.end_hi_ptr().write32_le((val >> 0x20) as u32);
-			} else {
-				debug_assert!(u32::try_from(val).is_ok(), "invalid end_addr");
-			}
+		let use_hi = self.0.offset(Entry::end_lo).read32_le() & 2 != 0;
+		self.0.offset(Entry::end_lo).write32_le(val as u32);
+		if use_hi {
+			self.end_hi_ptr().write32_le((val >> 0x20) as u32);
+		} else {
+			debug_assert!(u32::try_from(val).is_ok(), "invalid end_addr");
 		}
 	}
 
-	fn end_hi_ptr(&self) -> P {
-		unsafe {
-			let start_lo = self.0.offset(Entry::start_lo).read32_le();
-			if start_lo & 2 != 0 {
-				self.0.offset(Entry::hi1)
-			} else {
-				self.0.offset(Entry::hi0)
-			}
+	fn end_hi_ptr(&self) -> TPtr<P, u32> {
+		let start_lo = self.0.offset(Entry::start_lo).read32_le();
+		if start_lo & 2 != 0 {
+			unsafe { self.0.cast() }.offset(Entry::hi1)
+		} else {
+			unsafe { self.0.cast() }.offset(Entry::hi0)
 		}
 	}
 }

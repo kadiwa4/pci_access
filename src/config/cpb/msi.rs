@@ -2,15 +2,12 @@
 
 use num_enum::TryFromPrimitive;
 
-use crate::{
-	config::{bit_accessors, ReprPrimitive},
-	struct_offsets, Ptr, PtrExt,
-};
+use crate::{bit_accessors, struct_offsets, Ptr, ReprPrimitive, TPtr};
 
 pub const ID: u8 = 5;
 
 struct_offsets! {
-	struct Part0 {
+	pub(super) struct Part0 {
 		_common: [u8; 2],
 		message_control: MessageControl,
 		message_addr_lo: u32,
@@ -28,31 +25,30 @@ struct_offsets! {
 
 struct_offsets! {
 	struct Msi32 {
-		_part0: [u8; 4],
-		part1: [u8; 0x0C],
+		_part0: Part0,
+		part1: Part1,
 	}
 }
 
 struct_offsets! {
 	struct Msi64 {
-		_part0: [u8; 4],
+		_part0: Part0,
 		message_addr_hi: u32,
-		part1: [u8; 0x0C],
+		part1: Part1,
 	}
 }
 
 /// Reference to an MSI capability structure.
 #[derive(Clone, Copy, Debug)]
 pub struct MsiRef<P: Ptr> {
-	ptr: P,
+	ptr: TPtr<P, Part0>,
 	addr_64bit: bool,
 	per_vector_masking: bool,
 }
 
 impl<P: Ptr> MsiRef<P> {
-	pub(super) fn new(ptr: P) -> Self {
-		let message_control =
-			MessageControl(unsafe { ptr.offset(Part0::message_control).read16() });
+	pub(super) fn new(ptr: TPtr<P, Part0>) -> Self {
+		let message_control = MessageControl(ptr.offset(Part0::message_control).read());
 		Self {
 			ptr,
 			addr_64bit: message_control.addr_64bit_support(),
@@ -62,92 +58,79 @@ impl<P: Ptr> MsiRef<P> {
 
 	#[inline]
 	pub fn message_control(&self) -> MessageControl {
-		MessageControl(unsafe { self.ptr.offset(Part0::message_control).read16() })
+		MessageControl(self.ptr.offset(Part0::message_control).read())
 	}
 
 	#[inline]
 	pub fn set_message_control(&self, MessageControl(val): MessageControl) {
-		unsafe {
-			self.ptr.offset(Part0::message_control).write16(val);
-		}
+		self.ptr.offset(Part0::message_control).write(val);
 	}
 
 	pub fn message_addr(&self) -> u64 {
-		unsafe {
-			let mut val = self.ptr.offset(Part0::message_addr_lo).read32_le() as u64;
-			if self.addr_64bit {
-				let hi = self.ptr.offset(Msi64::message_addr_hi).read32_le();
-				val |= (hi as u64) << 0x20;
-			}
-			val
+		let mut val = self.ptr.offset(Part0::message_addr_lo).read32_le() as u64;
+		if self.addr_64bit {
+			let hi = unsafe { self.ptr.cast() }
+				.offset(Msi64::message_addr_hi)
+				.read32_le();
+			val |= (hi as u64) << 0x20;
 		}
+		val
 	}
 
 	pub fn set_message_addr(&self, val: u64) {
-		unsafe {
-			self.ptr
-				.offset(Part0::message_addr_lo)
-				.write32_le(val as u32);
-			if self.addr_64bit {
-				self.ptr
-					.offset(Msi64::message_addr_hi)
-					.write32_le((val >> 0x20) as u32);
-			} else {
-				debug_assert!(u32::try_from(val).is_ok(), "invalid message address");
-			}
+		self.ptr
+			.offset(Part0::message_addr_lo)
+			.write32_le(val as u32);
+		if self.addr_64bit {
+			unsafe { self.ptr.cast() }
+				.offset(Msi64::message_addr_hi)
+				.write32_le((val >> 0x20) as u32);
+		} else {
+			debug_assert!(u32::try_from(val).is_ok(), "invalid message address");
 		}
 	}
 
-	fn part1(&self) -> P {
-		let offset = if self.addr_64bit {
-			Msi64::part1
+	fn part1(&self) -> TPtr<P, Part1> {
+		if self.addr_64bit {
+			unsafe { self.ptr.cast() }.offset(Msi64::part1)
 		} else {
-			Msi32::part1
-		};
-		unsafe { self.ptr.offset(offset) }
+			unsafe { self.ptr.cast() }.offset(Msi32::part1)
+		}
 	}
 
 	pub fn message_data(&self) -> u16 {
-		unsafe { self.part1().offset(Part1::message_data).read16_le() }
+		self.part1().offset(Part1::message_data).read16_le()
 	}
 
 	pub fn set_message_data(&self, val: u16) {
-		unsafe {
-			self.part1().offset(Part1::message_data).write16_le(val);
-		}
+		self.part1().offset(Part1::message_data).write16_le(val);
 	}
 
 	pub fn extended_message_data(&self) -> u16 {
-		unsafe {
-			self.part1()
-				.offset(Part1::extended_message_data)
-				.read16_le()
-		}
+		self.part1()
+			.offset(Part1::extended_message_data)
+			.read16_le()
 	}
 
 	pub fn set_extended_message_data(&self, val: u16) {
-		unsafe {
-			self.part1()
-				.offset(Part1::extended_message_data)
-				.write16_le(val);
-		}
+		self.part1()
+			.offset(Part1::extended_message_data)
+			.write16_le(val);
 	}
 
 	pub fn mask(&self) -> u32 {
 		assert!(self.per_vector_masking, "per-vector masking not supported");
-		unsafe { self.part1().offset(Part1::mask).read32_le() }
+		self.part1().offset(Part1::mask).read32_le()
 	}
 
 	pub fn set_mask(&self, val: u32) {
 		assert!(self.per_vector_masking, "per-vector masking not supported");
-		unsafe {
-			self.part1().offset(Part1::mask).write32_le(val);
-		}
+		self.part1().offset(Part1::mask).write32_le(val);
 	}
 
 	pub fn pending(&self) -> u32 {
 		assert!(self.per_vector_masking, "per-vector masking not supported");
-		unsafe { self.part1().offset(Part1::pending).read32_le() }
+		self.part1().offset(Part1::pending).read32_le()
 	}
 }
 

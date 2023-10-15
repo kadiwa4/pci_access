@@ -6,15 +6,12 @@ use core::ops::{BitAnd, Bound};
 use bitflags::bitflags;
 use num_enum::TryFromPrimitive;
 
-use crate::{
-	config::{accessors, bit_accessors, ReprPrimitive},
-	struct_offsets, Ptr,
-};
+use crate::{accessors, bit_accessors, struct_offsets, Ptr, ReprPrimitive, TPtr};
 
 pub const ID: u8 = 0x10;
 
 struct_offsets! {
-	struct Pcie {
+	pub(super) struct Pcie {
 		_common: [u8; 2],
 		cpbs: PcieCpbs,
 		device_cpbs: DeviceCpbs,
@@ -44,7 +41,7 @@ struct_offsets! {
 /// Reference to a PCI Express capability structure (residing in conventional
 /// PCI configuration space).
 #[derive(Clone, Copy, Debug)]
-pub struct PcieRef<P: Ptr>(pub(super) P);
+pub struct PcieRef<P: Ptr>(pub(super) TPtr<P, Pcie>);
 
 impl<P: Ptr> PcieRef<P> {
 	accessors! {

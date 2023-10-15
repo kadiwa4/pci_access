@@ -5,7 +5,7 @@ use core::{
 	iter::FusedIterator,
 };
 
-use crate::{struct_offsets, Ptr, PtrExt};
+use crate::{struct_offsets, Ptr, TPtr};
 
 struct_offsets! {
 	struct ExtConfigSpace {
@@ -26,7 +26,8 @@ impl<P: Ptr> ExtCpbIter<P> {
 	/// - The input has to point to a valid PCI Express configuration space.
 	/// - Only one thread can access the configuration space at a time.
 	pub unsafe fn new(ptr: P) -> Self {
-		let current = Some(ExtCpb::new(ptr.offset(ExtConfigSpace::ext_cpbs)));
+		let t_ptr = TPtr::new(ptr.clone());
+		let current = Some(ExtCpb::new(t_ptr.offset(ExtConfigSpace::ext_cpbs).cast()));
 		Self {
 			base_ptr: ptr,
 			current: current.filter(|c| c.id != 0xFFFF || c.next_offset() == 0),
@@ -42,7 +43,7 @@ impl<P: Ptr> Iterator for ExtCpbIter<P> {
 			let current = self.current.clone()?;
 			let next_offset = current.next_offset() as i32;
 			self.current = (next_offset != 0)
-				.then(|| unsafe { ExtCpb::new(self.base_ptr.offset(next_offset)) });
+				.then(|| unsafe { ExtCpb::new(TPtr::new(self.base_ptr.offset(next_offset))) });
 			if current.id != 0 {
 				return Some(current);
 			}
@@ -62,15 +63,15 @@ impl<P: Ptr> Debug for ExtCpbIter<P> {
 /// Use the methods to get a specific one.
 #[derive(Clone, Copy)]
 pub struct ExtCpb<P: Ptr> {
-	header: P,
+	header: TPtr<P, u32>,
 	id: u16,
 }
 
 impl<P: Ptr> ExtCpb<P> {
 	/// # Safety
 	/// The input has to point to a extended capability.
-	unsafe fn new(ptr: P) -> Self {
-		let id = ptr.read16_le();
+	unsafe fn new(ptr: TPtr<P, u32>) -> Self {
+		let id = unsafe { ptr.cast::<u16>() }.read16_le();
 		Self { header: ptr, id }
 	}
 
@@ -79,11 +80,11 @@ impl<P: Ptr> ExtCpb<P> {
 	}
 
 	pub fn version(&self) -> u8 {
-		(unsafe { self.header.read32_le() } >> 0x10) as u8 & 0x0F
+		(self.header.read32_le() >> 0x10) as u8 & 0x0F
 	}
 
 	fn next_offset(&self) -> u16 {
-		(unsafe { self.header.read32_le() } >> 0x14) as u16 & 0x0FFC
+		(self.header.read32_le() >> 0x14) as u16 & 0x0FFC
 	}
 }
 
